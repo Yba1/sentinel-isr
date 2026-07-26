@@ -115,6 +115,30 @@ class Scenario:
     def n_vessels(self) -> int:
         return len(self.true_tracks)
 
+    def display_id(self, actor: str, t: float) -> str:
+        """The identity ``actor`` broadcasts at time ``t``.
+
+        Purely a function of ``identity_change`` events (``params.new_display_id``),
+        never of measurements -- radar-source Measurements are structurally
+        incapable of carrying identity, so this is the ONLY place a display
+        identity can come from. An event at exactly ``t`` has already applied
+        (inclusive ``<=``): s02_mmsi_spoof's two spoofing events both fire at
+        ``t=0.0``, and ``display_id(actor, 0.0)`` must already reflect them, not
+        wait for the next tick. With no identity_change event at or before
+        ``t``, the actor key itself is the display identity (a synthetic
+        ``gen:`` actor's own id, or a real vessel's own MMSI-as-key) -- most
+        scenarios (s01) never touch identity at all, and this makes that the
+        default rather than a special case.
+        """
+        latest_t = None
+        latest_id = actor
+        for ev in self.events:
+            if ev.kind == "identity_change" and ev.actor == actor and ev.t <= t:
+                if latest_t is None or ev.t >= latest_t:
+                    latest_t = ev.t
+                    latest_id = ev.params["new_display_id"]
+        return latest_id
+
     def mint_meas_id(self, actor: str) -> str:
         """Reserve a fresh measurement id and bind its ground truth.
 
