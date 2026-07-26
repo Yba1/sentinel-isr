@@ -1,0 +1,63 @@
+{
+  "id": "s01_dark_in_sanctuary",
+  "name": "Dark vessel loitering in the Central Bay sanctuary",
+  "description": "Real SF Bay Saturday traffic. A synthetic ghost vessel transits toward the sanctuary, kills its AIS mid-transit, and loiters inside. Sparse radar contacts reveal it. A second synthetic vessel swaps its display MMSI mid-run.",
+  "seed": 20260726,
+  "origin": {"lat": 37.825, "lon": -122.4},
+  "bbox": {"lon_min": -122.55, "lat_min": 37.7, "lon_max": -122.2, "lat_max": 37.95},
+  "time_window": {"start": "2024-06-15T18:00:00+00:00", "end": "2024-06-15T20:00:00+00:00"},
+  "frame_interval_s": 30.0,
+  "ais_csv": "ais_window.csv",
+  "ais_required": true,
+  "ais_noise_sigma_m": 5.0,
+  "min_fixes_per_vessel": 4,
+  "geofence_layers": [
+    {"file": "layers/central_bay_sanctuary.geojson", "kind": "sanctuary"},
+    {"file": "layers/gate_approach_restricted.geojson", "kind": "restricted"}
+  ],
+  "synthetic_actors": [
+    {
+      "actor_id": "ghost_1",
+      "track": "gen:transit_then_loiter",
+      "params": {
+        "start_latlon": [37.805, -122.468],
+        "heading_deg": 60.0,
+        "speed_mps": 5.0,
+        "transit_s": 1000.0,
+        "loiter_radius_m": 200.0,
+        "loiter_speed_mps": 1.5,
+        "t_start": 0.0,
+        "t_end": 7200.0
+      }
+    },
+    {
+      "actor_id": "spoofer_1",
+      "track": "gen:transit",
+      "params": {
+        "start_latlon": [37.87, -122.36],
+        "heading_deg": 205.0,
+        "speed_mps": 4.0,
+        "t_start": 600.0,
+        "t_end": 6600.0
+      }
+    }
+  ],
+  "events": [
+    {"id": "ev_dark", "t": 300.0, "kind": "ais_off", "actor": "ghost_1"},
+    {"id": "ev_r1", "t": 1500.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r2", "t": 2100.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r3", "t": 2700.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r4", "t": 3600.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r5", "t": 4500.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_swap", "t": 2400.0, "kind": "identity_change", "actor": "spoofer_1", "params": {"new_display_id": "mmsi:999999999"}}
+  ],
+  "expected": {
+    "min_vessels": 30,
+    "min_crossings": 2,
+    "dark_actor": "ghost_1",
+    "dark_at_s": 300.0,
+    "sanctuary_entry_s": 480.0,
+    "intrusion_fence": "central_bay_sanctuary",
+    "reacquire_via": "radar_contact"
+  }
+}
