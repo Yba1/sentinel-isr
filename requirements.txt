@@ -21,3 +21,6 @@ jaclang==0.16.7
 numpy==2.5.1
 scipy==1.18.0
 pytest==9.1.1
+
+# Phase 3.5 geofencing: point-in-polygon via STRtree, in-memory, no PostGIS.
+shapely==2.1.2
