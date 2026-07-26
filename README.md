@@ -46,7 +46,8 @@ Boundary: Kalman predict/update, gating, cost matrices, the Hungarian solve,
 eigendecomposition and shapely all stay in Python. `tracker/assoc.py` owns the
 track lifecycle too — a `Track` node holds a `tracker.assoc.Track` and
 *projects* its status, hits and LLR score rather than running a second state
-machine. Line split: ~1.7k Jac / ~1.5k Python product code (~53% Jac).
+machine. Line split: 1,755 Jac / 2,077 Python product code (**45.8% Jac**),
+counted with `find . -name "*.jac" | xargs wc -l`.
 
 ### Two-stage association (dark-vessel re-acquisition)
 
