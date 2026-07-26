@@ -19,6 +19,26 @@ Identity is never used for association — recovering it from kinematics alone i
 | 3 | Hypothesis branching as Jac walker spawning | not started |
 | 4 | Geofence intrusion + dark-vessel re-association | not started |
 
+## Data layer (scenario packs + replay)
+
+`data/scenario.py` loads a scenario pack (`scenarios/<id>/pack.json`) into memory: real
+SF Bay AIS resampled to 30 s frames in local ENU, geofence GeoJSON layers, synthetic
+actors from `gen:` track generators, and scripted events (`ais_off`, `radar_contact`,
+`identity_change`). MMSI is stripped at ingest into a ground-truth side table — a
+`Measurement` is structurally incapable of carrying identity, and the loader asserts it.
+`data/replay.py` paces frames at 1x/10x/60x with instant `seek()` and `reset()`.
+
+```bash
+# one-time: fetch a MarineCadastre day and cache the pack's window (~1 MB, committed)
+python scripts/extract_window.py --zip data/raw/AIS_2024_06_15.zip --pack s01_dark_in_sanctuary
+python scripts/find_crossings.py --pack s01_dark_in_sanctuary   # pick/verify the window
+python -m data.replay s01_dark_in_sanctuary                     # smoke run
+```
+
+Measured on `s01_dark_in_sanctuary`: 328 vessels, 69,530 measurements, load 0.24 s,
+seek 3 µs. Swapping packs is a string change (`s02_synthetic_demo` is the
+synthetic-only fallback).
+
 ## Phase 1 acceptance
 
 | Criterion | Target | Measured |

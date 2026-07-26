@@ -10,6 +10,8 @@ env/
 .idea/
 .DS_Store
 
-# Data is fetched, not committed (AIS windows are large; geo layers are Tier A/B downloads)
-data/
-geo/
+# Raw downloads are fetched, not committed. data/*.py is the replay layer (committed);
+# extracted per-pack AIS windows (scenarios/*/ais_window.csv, ~1 MB) are committed too
+# so the demo runs without the 400 MB MarineCadastre pull.
+/data/raw/
+/geo/

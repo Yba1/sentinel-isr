@@ -1,0 +1,26 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "central_bay_sanctuary",
+        "name": "Central Bay Marine Sanctuary (demo layer)",
+        "kind": "sanctuary"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-122.445, 37.815],
+            [-122.4, 37.808],
+            [-122.36, 37.825],
+            [-122.375, 37.865],
+            [-122.435, 37.86],
+            [-122.445, 37.815]
+          ]
+        ]
+      }
+    }
+  ]
+}
