@@ -1,63 +1,46 @@
 {
   "id": "s01_dark_in_sanctuary",
-  "name": "Dark vessel loitering in the Central Bay sanctuary",
-  "description": "Real SF Bay Saturday traffic. A synthetic ghost vessel transits toward the sanctuary, kills its AIS mid-transit, and loiters inside. Sparse radar contacts reveal it. A second synthetic vessel swaps its display MMSI mid-run.",
+  "name": "Dark vessel loitering in the Monterey Bay National Marine Sanctuary",
+  "description": "Single synthetic target transits into the Monterey Bay NMS from open water, loiters near its entry point (tight circle, radius 1000 m), then kills AIS 30 minutes after crossing the boundary. It keeps loitering unseen. A radar contact 40 minutes later lands on the loiter circle -- up to ~2 km from where a naive constant-velocity prediction (extrapolating the last known transit heading/speed) would place it. This is the headline demo: enter -> geofence alert -> dark -> uncertainty ellipse grows -> radar contact -> re-attribution to the same track.",
   "seed": 20260726,
-  "origin": {"lat": 37.825, "lon": -122.4},
-  "bbox": {"lon_min": -122.55, "lat_min": 37.7, "lon_max": -122.2, "lat_max": 37.95},
-  "time_window": {"start": "2024-06-15T18:00:00+00:00", "end": "2024-06-15T20:00:00+00:00"},
+  "origin": {"lat": 36.75, "lon": -121.95},
+  "bbox": {"lon_min": -123.2, "lat_min": 35.4, "lon_max": -121.0, "lat_max": 38.0},
+  "time_window": {"start": "2024-06-15T06:00:00+00:00", "end": "2024-06-15T08:00:00+00:00"},
   "frame_interval_s": 30.0,
-  "ais_csv": "ais_window.csv",
-  "ais_required": true,
-  "ais_noise_sigma_m": 5.0,
-  "min_fixes_per_vessel": 4,
+  "ais_required": false,
   "geofence_layers": [
-    {"file": "layers/central_bay_sanctuary.geojson", "kind": "sanctuary"},
-    {"file": "layers/gate_approach_restricted.geojson", "kind": "restricted"}
+    {"file": "layers/monterey_bay_nms.geojson", "kind": "sanctuary"}
   ],
   "synthetic_actors": [
     {
-      "actor_id": "ghost_1",
+      "actor_id": "target_1",
       "track": "gen:transit_then_loiter",
       "params": {
-        "start_latlon": [37.805, -122.468],
-        "heading_deg": 60.0,
-        "speed_mps": 5.0,
-        "transit_s": 1000.0,
-        "loiter_radius_m": 200.0,
-        "loiter_speed_mps": 1.5,
+        "start_latlon": [36.75, -122.90],
+        "heading_deg": 90.0,
+        "speed_mps": 6.0,
+        "transit_s": 1500.0,
+        "loiter_radius_m": 1000.0,
+        "loiter_speed_mps": 0.83,
         "t_start": 0.0,
         "t_end": 7200.0
-      }
-    },
-    {
-      "actor_id": "spoofer_1",
-      "track": "gen:transit",
-      "params": {
-        "start_latlon": [37.87, -122.36],
-        "heading_deg": 205.0,
-        "speed_mps": 4.0,
-        "t_start": 600.0,
-        "t_end": 6600.0
       }
     }
   ],
   "events": [
-    {"id": "ev_dark", "t": 300.0, "kind": "ais_off", "actor": "ghost_1"},
-    {"id": "ev_r1", "t": 1500.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_r2", "t": 2100.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_r3", "t": 2700.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_r4", "t": 3600.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_r5", "t": 4500.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_swap", "t": 2400.0, "kind": "identity_change", "actor": "spoofer_1", "params": {"new_display_id": "mmsi:999999999"}}
+    {"id": "ev_dark", "t": 3135.0, "kind": "ais_off", "actor": "target_1"},
+    {"id": "ev_radar", "t": 5535.0, "kind": "radar_contact", "actor": "target_1", "params": {"sigma": 50.0}}
   ],
   "expected": {
-    "min_vessels": 30,
-    "min_crossings": 2,
-    "dark_actor": "ghost_1",
-    "dark_at_s": 300.0,
-    "sanctuary_entry_s": 480.0,
-    "intrusion_fence": "central_bay_sanctuary",
-    "reacquire_via": "radar_contact"
+    "id_switches_max": 0,
+    "reassoc_p_min": 0.85,
+    "geofence_alert": true,
+    "dark_actor": "target_1",
+    "sanctuary_entry_s": 1350.0,
+    "dark_at_s": 3135.0,
+    "radar_contact_at_s": 5535.0,
+    "intrusion_fence": "monterey_bay_nms",
+    "predicted_vs_true_offset_verified_m": 1794,
+    "notes": "sanctuary_entry_s verified against the actual boundary crossing on this track (frame-grid snapped to 1350s, computed continuous crossing 1335s); dark_at_s = entry + 1800s; radar_contact_at_s = dark_at_s + 2400s, per brief. loiter_speed_mps=0.83 was tuned (verify_s01.py) so a naive last-known-velocity extrapolation from the moment AIS goes dark misses the true radar-contact position by 1794 m, i.e. ~2 km as specified."
   }
 }
