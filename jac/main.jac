@@ -22,7 +22,7 @@ import from data.replay { ReplayEngine }
 import from data.scenario { load_scenario }
 import from jac.graph { Mission, build_mission, alerts_of, tracks_of }
 import from jac.driver { ScenarioDriver }
-import from jac.fusion { Fusion, resolve_associator }
+import from jac.fusion { Fusion, assoc_provenance }
 import from jac.alerts { AlertScribe, Briefer }
 import from jac.render { Renderer, frame_delta }
 
@@ -38,36 +38,32 @@ def run_pack(pack_id: str, max_frames: int = -1, seed_offset: int = 1) -> dict {
     mission.meta["rng"] = np.random.default_rng(
         int(scenario.expected.get("seed", 0)) + 20260726 + seed_offset,
     );
-    (associate, assoc_source) = resolve_associator();
 
     deltas = [];
     for frame in engine.play(realtime=False) {
         if max_frames >= 0 and frame.idx >= max_frames {
             break;
         }
-        delta = run_frame(mission, scenario, frame, associate);
-        deltas.append(delta);
+        deltas.append(run_frame(mission, scenario, frame));
     }
     return {
         "pack_id": scenario.pack_id,
         "deltas": deltas,
         "mission": mission,
         "scenario": scenario,
-        "assoc_source": assoc_source,
+        "assoc_source": assoc_provenance(),
     };
 }
 
 
 """One tick of the product: exactly the walker sequence the WebSocket layer
 will drive. Zones ride along on frame 0 only."""
-def run_frame(mission: Mission, scenario: object, frame: object,
-              associate: object) -> dict {
+def run_frame(mission: Mission, scenario: object, frame: object) -> dict {
     driver = ScenarioDriver(scenario=scenario, frame=frame) spawn mission;
     fusion = Fusion(
         t=frame.t,
         dt=scenario.frame_interval_s,
         meas=driver.effective,
-        associate=associate,
     ) spawn mission;
     for alert in fusion.new_alerts {
         AlertScribe() spawn alert;

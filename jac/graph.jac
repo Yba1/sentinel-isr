@@ -9,8 +9,8 @@ the frontend renders and the judges ask about: which track is inside which
 zone (InZone), which alert concerns which track and zone (RaisedOn /
 Concerning), and which detections justify which alert (JustifiedBy).
 
-The tracker mathematics never lives here -- a Track node HOLDS a CVKalman
-object, it does not reimplement one.
+The tracker mathematics never lives here -- a Track node HOLDS Raj's
+`tracker.assoc.Track` (filter + lifecycle score), it does not reimplement one.
 """
 
 import logging;
@@ -26,21 +26,24 @@ glob _quiet_serializer = logging.getLogger(
 
 # ------------------------------------------------------------- track lifecycle
 
-glob STATUS_TENTATIVE: str = "tentative";   # born, not yet confirmed
-glob STATUS_ACTIVE: str = "active";         # confirmed, receiving measurements
+# Lifecycle vocabulary is Raj's (tracker/assoc.py). A Track node PROJECTS the
+# status of its `tracker.assoc.Track`; the graph does not run a second state
+# machine. Confirmation (3-of-5), coasting and deletion are decided there, by
+# hit counts and the log-likelihood-ratio score together.
+glob STATUS_TENTATIVE: str = "tentative";
+glob STATUS_CONFIRMED: str = "confirmed";
 glob STATUS_COASTING: str = "coasting";     # prediction only -- dark or occluded
-glob STATUS_DROPPED: str = "dropped";       # coasted too long, retired
+glob STATUS_DEAD: str = "dead";             # absorbing; retired from the picture
 
-glob CONFIRM_HITS: int = 3;        # tentative -> active after this many updates
-glob COAST_AFTER_MISSES: int = 2;  # active -> coasting after this many empty frames
-# Holding dark tracks long enough to reacquire them IS the product, so the
-# coast budget is generous: 60 frames = 30 min at the 30 s frame interval.
-glob DROP_AFTER_COAST: int = 60;
+glob LIVE_STATUSES: list = [
+    STATUS_TENTATIVE, STATUS_CONFIRMED, STATUS_COASTING,
+];
 
-# Alert dampers, tuned on real SF Bay traffic where hundreds of vessels have
-# ragged AIS coverage. State transitions always happen; ALERTS are reserved
-# for tracks with enough history to make "went dark" meaningful, and for
-# reacquisitions after a genuine dark period rather than a two-frame gap.
+# Alert dampers stay graph policy -- they decide what is worth telling an
+# operator, not what is true. Tuned on real SF Bay traffic where hundreds of
+# vessels have ragged AIS coverage: state transitions always happen, but
+# ALERTS need enough history to make "went dark" meaningful and a genuine dark
+# period rather than a two-frame gap.
 glob DARK_MIN_HITS: int = 6;      # updates required before went_dark alerts
 glob REACQ_MIN_COAST: int = 4;    # dark frames required before reacquired alerts
 
@@ -83,12 +86,26 @@ node ActorState {
     has display_id: str = "";          # what the UI would show, post identity_change
 }
 
-"""One fused vessel hypothesis. `kf` is Raj's CVKalman; the snapshot fields
-mirror kf.state / kf.cov after each frame so the graph (and the renderer)
-never reach into filter internals mid-flight."""
+"""One fused vessel hypothesis.
+
+`rt` is Raj's `tracker.assoc.Track`: it owns the CVKalman AND the lifecycle
+(status, hit/miss counts, LLR score). Everything below `rt` is either a
+projection of it -- refreshed once per frame by `sync_from_tracker` -- or
+graph-side context the tracker has no opinion about (zones, provenance).
+Treat the projected fields as read-only: writing one changes what the map
+draws without changing what the tracker believes.
+
+The underscore on `_rt` is load-bearing, not style: the runtime serializes
+every public attribute of a dirty anchor on each walker commit, and walking a
+filter's numpy arrays for 300+ tracks per frame cost ~4x the entire rest of
+the pipeline. Underscore-prefixed attributes are skipped, which is exactly
+right here -- the filter is live run state, not part of the persisted
+picture, and the projected fields above are what any reader actually wants."""
 node Track {
     has track_id: str = "";
-    has kf: object = None;
+    has _rt: object = None;         # tracker.assoc.Track -- the authority
+
+    # --- projected from rt (read-only) ----------------------------------
     has x: float = 0.0;
     has y: float = 0.0;
     has vx: float = 0.0;
@@ -99,13 +116,35 @@ node Track {
     has status: str = "tentative";
     has hits: int = 0;
     has misses: int = 0;
-    has coast_frames: int = 0;
+    has llr: float = 0.0;          # track score; falling means bleeding out
+
+    # --- graph-side context ---------------------------------------------
     has born_t: float = 0.0;
     has last_t: float = 0.0;
     has last_source: str = "";     # sensor of the last fused measurement
     has last_meas_id: str = "";
+    has last_fix_x: float = 0.0;   # last MEASURED position, for reachability
+    has last_fix_y: float = 0.0;
     has zones_in: list = [];       # zone_ids currently containing this track
     has was_dark: bool = False;    # coasted at least once (for reacquire alerts)
+
+    """Pull the tracker's state into the graph. The single place these fields
+    are written, so 'projection' stays a fact rather than an aspiration."""
+    def sync_from_tracker() -> None {
+        st = self._rt.kf.state;
+        cv = self._rt.kf.cov;
+        self.x = float(st[0]);
+        self.y = float(st[1]);
+        self.vx = float(st[2]);
+        self.vy = float(st[3]);
+        self.p00 = float(cv[0][0]);
+        self.p01 = float(cv[0][1]);
+        self.p11 = float(cv[1][1]);
+        self.status = self._rt.status;
+        self.hits = self._rt.hits;
+        self.misses = self._rt.misses;
+        self.llr = float(self._rt.llr);
+    }
 }
 
 """Evidence node: an unlabelled detection worth keeping in the graph --
@@ -192,7 +231,7 @@ def zones_of(m: Mission) -> list {
 }
 
 def tracks_of(m: Mission) -> list {
-    return [t for t in [m -->[?:Track]] if t.status != STATUS_DROPPED];
+    return [t for t in [m -->[?:Track]] if t.status in LIVE_STATUSES];
 }
 
 def alerts_of(m: Mission) -> list {

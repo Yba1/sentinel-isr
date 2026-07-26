@@ -15,6 +15,8 @@ from shapely.geometry import Point, Polygon
 
 __all__ = [
     "cov_ellipse_points",
+    "innovation_stats",
+    "reachable",
     "make_zone_polygon",
     "polygon_contains",
     "point_in_ring",
@@ -51,6 +53,34 @@ def cov_ellipse_points(cx: float, cy: float,
     ring = [(float(x), float(y)) for x, y in zip(xs, ys)]
     ring.append(ring[0])
     return ring
+
+
+def innovation_stats(kf: object, z: Sequence[float],
+                     R: Sequence[Sequence[float]]) -> Tuple[float, float]:
+    """``(d2, logdet_S)`` for one track/measurement pair.
+
+    ``tracker.assoc.Track.register_hit`` scores an association from these two
+    numbers, but ``AssocResult`` only carries the ``d2`` matrix, so the
+    log-determinant is recomputed here from the filter's own innovation. Two
+    2x2 operations per assignment -- cheaper than threading another matrix out
+    of the solver, and it keeps ``tracker/`` untouched.
+    """
+    nu, S = kf.innovation(np.asarray(z, dtype=float), np.asarray(R, dtype=float))
+    d2 = float(nu @ np.linalg.solve(S, nu))
+    _sign, logdet = np.linalg.slogdet(S)
+    return d2, float(logdet)
+
+
+def reachable(x0: float, y0: float, x1: float, y1: float,
+              elapsed_s: float, max_speed_mps: float) -> bool:
+    """Could a vessel at (x0, y0) have got to (x1, y1) in ``elapsed_s``?
+
+    A constant-velocity filter's covariance grows as q*t^3/3, which after a few
+    minutes dark is tens of kilometres -- far wider than anything that floats
+    can actually travel. This is the kinematic bound the covariance does not
+    know about, and it is what really limits dark-vessel re-association.
+    """
+    return math.hypot(x1 - x0, y1 - y0) <= max_speed_mps * max(elapsed_s, 0.0)
 
 
 def make_zone_polygon(ring: Sequence[Sequence[float]]) -> Polygon:

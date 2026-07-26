@@ -44,11 +44,12 @@
   ],
   "events": [
     {"id": "ev_dark", "t": 300.0, "kind": "ais_off", "actor": "ghost_1"},
-    {"id": "ev_r1", "t": 1500.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_r2", "t": 2100.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_r3", "t": 2700.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_r4", "t": 3600.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_r5", "t": 4500.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r1", "t": 540.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r2", "t": 840.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r3", "t": 1140.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r4", "t": 1740.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r5", "t": 2340.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r6", "t": 3000.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
     {"id": "ev_swap", "t": 2400.0, "kind": "identity_change", "actor": "spoofer_1", "params": {"new_display_id": "mmsi:999999999"}}
   ],
   "expected": {

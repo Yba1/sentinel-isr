@@ -61,7 +61,12 @@ def test_deltas_are_render_ready(s02_run):
 
 
 def test_dark_ellipse_grows_while_coasting(s02_run):
-    """The visual story: the ghost's uncertainty balloons between radar fixes."""
+    """The visual story: the ghost's uncertainty balloons between radar fixes.
+
+    Measured over the first unbroken dark stretch rather than fixed frame
+    numbers, so retiming the scripted radar contacts cannot quietly turn this
+    into a test of nothing.
+    """
     def ghost_extent(d):
         for tp in d["tracks"]:
             if tp["dark"]:
@@ -69,10 +74,16 @@ def test_dark_ellipse_grows_while_coasting(s02_run):
                 return max(xs) - min(xs)
         return None
 
-    by_idx = {d["frame_idx"]: ghost_extent(d) for d in s02_run["deltas"]}
-    early = by_idx.get(12)          # shortly after going dark (t=360)
-    late = by_idx.get(38)           # ~20 min dark (t=1140)
-    assert early and late and late > 3 * early
+    run = []
+    for d in s02_run["deltas"]:
+        extent = ghost_extent(d)
+        if extent is not None:
+            run.append(extent)
+        elif run:
+            break                   # first dark stretch ended at a radar fix
+
+    assert len(run) >= 3, "expected a multi-frame dark stretch"
+    assert run[-1] > 3 * run[0]
 
 
 def test_identity_never_reaches_a_delta(s02_run):

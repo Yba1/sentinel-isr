@@ -14,7 +14,7 @@ import from data.geometry { cov_ellipse_points, heading_speed }
 import from data.scenario { enu_to_lla }
 import from jac.graph {
     Mission, Track, Zone,
-    zones_of, STATUS_TENTATIVE, STATUS_ACTIVE, STATUS_COASTING,
+    zones_of, LIVE_STATUSES, STATUS_COASTING,
 }
 import from jac.driver { fmt_t }
 
@@ -22,9 +22,9 @@ import from jac.driver { fmt_t }
 # are extrapolating, hard red for alerts. Tentative stays dim until confirmed.
 glob TRACK_COLORS: dict = {
     "tentative": "#5b6673",
-    "active": "#2dd4bf",
+    "confirmed": "#2dd4bf",
     "coasting": "#f59e0b",
-    "dropped": "#374151",
+    "dead": "#374151",
 };
 
 glob ZONE_STYLES: dict = {
@@ -75,7 +75,7 @@ walker Renderer {
     }
 
     can snap with Track entry {
-        if here.status not in [STATUS_TENTATIVE, STATUS_ACTIVE, STATUS_COASTING] {
+        if here.status not in LIVE_STATUSES {
             return;
         }
         (hdg, spd) = heading_speed(here.vx, here.vy);
@@ -180,6 +180,7 @@ def frame_delta(m: Mission, driver: object, fusion: object,
 # ----------------------------------------------------------------------- tests
 
 import from tracker.kalman { CVKalman }
+import from tracker.assoc { Track as RTrack }
 
 test "ellipse is a closed ring that grows with covariance" {
     t1 = Track(track_id="T-1", x=0.0, y=0.0, p00=100.0, p01=0.0, p11=100.0);
@@ -195,16 +196,16 @@ test "ellipse is a closed ring that grows with covariance" {
 test "dark track inside a zone renders alarm red" {
     assert track_color("coasting", True) == "#ef4444";
     assert track_color("coasting", False) == TRACK_COLORS["coasting"];
-    assert track_color("active", True) == TRACK_COLORS["active"];
+    assert track_color("confirmed", True) == TRACK_COLORS["confirmed"];
 }
 
 test "renderer snapshots only live tracks with derived kinematics" {
     m = Mission(pack_id="r");
     root ++> m;
-    kf = CVKalman();
-    live = Track(track_id="T-1", kf=kf, status="active",
+    rt = RTrack(id=1, kf=CVKalman());
+    live = Track(track_id="T-1", _rt=rt, status="confirmed",
                  x=100.0, y=0.0, vx=5.0, vy=0.0, p00=25.0, p11=25.0);
-    gone = Track(track_id="T-2", kf=kf, status="dropped");
+    gone = Track(track_id="T-2", _rt=rt, status="dead");
     m ++> live;
     m ++> gone;
     r = Renderer(origin=(37.825, -122.4)) spawn m;

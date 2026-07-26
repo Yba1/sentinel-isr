@@ -24,7 +24,7 @@ glob _quiet_litellm = setattr(litellm, "suppress_debug_info", True);
 import from jac.graph {
     Mission, Track, Zone, Alert, Contact, Brief,
     RaisedOn, Concerning, JustifiedBy, Summarizes,
-    alerts_of, mint_alert_id,
+    alerts_of, mint_alert_id, LIVE_STATUSES,
 }
 import from jac.driver { fmt_t }
 
@@ -245,7 +245,7 @@ walker Briefer {
             t for t in [here -->[?:Track]] if t.status == "coasting"
         ]);
         n_tracks = len([
-            t for t in [here -->[?:Track]] if t.status in ["active", "coasting"]
+            t for t in [here -->[?:Track]] if t.status in LIVE_STATUSES
         ]);
         digest = _digest(lines, n_tracks, n_dark, fmt_t(here.t));
         try {
@@ -313,7 +313,7 @@ test "scribe composes a headline with provenance and never leaves it empty" {
     m = Mission(pack_id="t2");
     root ++> m;
     m.meta["next_alert"] = 1;
-    trk = Track(track_id="T-002", status="active");
+    trk = Track(track_id="T-002", status="confirmed");
     m ++> trk;
     a = raise_alert(m, trk, "went_dark", None, 600.0, []);
     scribe = AlertScribe() spawn a;
