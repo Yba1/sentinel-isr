@@ -40,7 +40,7 @@
     }
   ],
   "events": [
-    {"id": "ev_dark", "t": 600.0, "kind": "ais_off", "actor": "ghost_1"},
+    {"id": "ev_dark", "t": 180.0, "kind": "ais_off", "actor": "ghost_1"},
     {"id": "ev_r1", "t": 1500.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
     {"id": "ev_r2", "t": 2400.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}}
   ],

@@ -51,14 +51,16 @@ def test_load_returns_frames_and_geofences(s02):
     assert s02.n_frames == 121                      # 60 min at 30 s + fencepost
     assert s02.frames[1].t - s02.frames[0].t == 30.0
     assert [g.fence_id for g in s02.geofences] == ["central_bay_sanctuary"]
-    # Geofence is in ENU metres: the sanctuary spans a few km around the origin.
+    # Geofence is in ENU metres: the Alcatraz box is ~1.8 km wide, west of origin.
     ring_x = [p[0] for p in s02.geofences[0].ring]
-    assert 2_000 < max(ring_x) - min(ring_x) < 10_000
+    assert 1_000 < max(ring_x) - min(ring_x) < 5_000
+    assert max(ring_x) < 0                          # entirely west of origin
 
 
 def test_geofence_contains(s02):
     fence = s02.geofences[0]
-    assert fence.contains(0.0, 1500.0)              # mid-sanctuary
+    assert fence.contains(-1900.0, 200.0)           # Alcatraz waters
+    assert not fence.contains(0.0, 0.0)             # scenario origin is outside
     assert not fence.contains(50_000.0, 50_000.0)
 
 
@@ -88,29 +90,45 @@ def test_no_measurement_carries_identity(s02):
                                (m.meas_id, m.source))
 
 
-def test_ais_off_suppresses_and_radar_contact_injects(s02):
-    ghost_meas = [
+def test_loader_leaves_events_unapplied(s02):
+    """Boundary rule: the loader emits the FULL unsuppressed AIS picture.
+
+    Suppression, radar injection and identity swaps are graph mutations owned
+    by the ScenarioDriver walker (jac/driver.jac), so the ghost's AIS must
+    continue past its ais_off timestamp here, and no radar measurement may
+    exist at load time.
+    """
+    ghost_ais = [
         m for f in s02.frames for m in f.measurements
         if s02.ground_truth[m.meas_id] == "ghost_1"
     ]
-    ais = [m for m in ghost_meas if m.source == "ais"]
-    radar = [m for m in ghost_meas if m.source == "radar"]
-    assert max(m.t for m in ais) < 600.0            # dark from ev_dark onward
-    assert sorted(m.t for m in radar) == [1500.0, 2400.0]
-    assert all(m.sigma == 50.0 for m in radar)
-    # The vessel still exists while dark: truth continues past the event.
-    assert s02.true_tracks["ghost_1"][-1][0] >= 3600.0 - 30.0
+    assert all(m.source == "ais" for m in ghost_ais)
+    assert max(m.t for m in ghost_ais) > 600.0      # NOT suppressed at load
+    assert not any(
+        m.source == "radar" for f in s02.frames for m in f.measurements
+    )
+    # Events ride on their frame for the driver to dispatch.
+    ev_frames = {ev.kind: f.idx for f in s02.frames for ev in f.events}
+    assert ev_frames["ais_off"] == 6                # t=180 at 30 s frames
+    assert "radar_contact" in ev_frames
 
 
-def test_radar_contact_lands_near_truth(s02):
-    from data.scenario import _true_position_at
-    for f in s02.frames:
-        for m in f.measurements:
-            if m.source != "radar":
-                continue
-            pos = _true_position_at(s02.true_tracks["ghost_1"], m.t)
-            err = ((m.x - pos[0]) ** 2 + (m.y - pos[1]) ** 2) ** 0.5
-            assert err < 5 * 50.0                   # within 5 sigma of truth
+def test_true_position_at_interpolates():
+    from data.scenario import true_position_at
+    track = [(0.0, 0.0, 0.0), (30.0, 300.0, -60.0)]
+    assert true_position_at(track, 15.0) == (150.0, -30.0)
+    assert true_position_at(track, 45.0) is None    # beyond the track
+    assert true_position_at([], 0.0) is None
+
+
+def test_mint_meas_id_extends_ground_truth(s02):
+    """Radar contacts injected by the driver get collision-free ids and their
+    identity lands in the side table, never on a measurement."""
+    before = s02.next_meas_seq
+    mid = s02.mint_meas_id("ghost_1")
+    assert mid == f"m{before:06d}"
+    assert s02.ground_truth[mid] == "ghost_1"
+    assert s02.next_meas_seq == before + 1
 
 
 def test_synthetic_crossing_found(s02):
@@ -127,9 +145,11 @@ def test_loads_are_deterministic():
            [m for f in b.frames for m in f.measurements]
 
 
-def test_identity_change_swaps_display_only(s02_swap=None):
-    s01_pack = load_scenario(S02)                   # no identity_change here
-    assert s01_pack.display_id("ghost_1", 9_999.0) == "ghost_1"
+def test_events_parsed_with_params(s02):
+    kinds = {ev.kind for ev in s02.events}
+    assert kinds == {"ais_off", "radar_contact"}
+    radar = [ev for ev in s02.events if ev.kind == "radar_contact"]
+    assert all(ev.params["sigma"] == 50.0 for ev in radar)
 
 
 # ----------------------------------------------------------- real AIS pack
@@ -161,9 +181,12 @@ def test_s01_identity_stripped_from_real_ais(s01):
 
 
 @needs_ais
-def test_s01_identity_change_display_swap(s01):
-    assert s01.display_id("spoofer_1", 0.0) == "spoofer_1"
-    assert s01.display_id("spoofer_1", 2400.0) == "mmsi:999999999"
+def test_s01_identity_change_event_parsed(s01):
+    swaps = [ev for ev in s01.events if ev.kind == "identity_change"]
+    assert len(swaps) == 1
+    assert swaps[0].actor == "spoofer_1"
+    assert swaps[0].params["new_display_id"] == "mmsi:999999999"
+    # Application is the ScenarioDriver walker's job, not the loader's.
 
 
 def test_pack_swap_needs_no_code_changes():
