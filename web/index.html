@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sentinel-ISR</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+
+  <div class="main-row">
+
+    <aside id="eventlog">
+      <h1 class="rail-title">Event Log</h1>
+      <div id="log-entries" aria-live="polite"></div>
+    </aside>
+
+    <div id="map"></div>
+
+    <aside id="idpanel">
+      <div class="idpanel-label">ID SWITCHES</div>
+      <div id="id-switch-count">0</div>
+      <div class="idpanel-sub" id="stats-tracks">0 live</div>
+      <div class="idpanel-sub" id="stats-dark">0 dark</div>
+    </aside>
+
+  </div>
+
+  <div id="transport">
+    <button id="btn-reset" class="tbtn" title="Reset to frame 0">⏮ Reset</button>
+    <button id="btn-play" class="tbtn tbtn-primary" title="Play / Pause">▶ Play</button>
+
+    <div class="speed-group" role="group" aria-label="Playback speed">
+      <button class="tbtn speed-btn" data-speed="1">1×</button>
+      <button class="tbtn speed-btn" data-speed="10">10×</button>
+      <button class="tbtn speed-btn" data-speed="60">60×</button>
+    </div>
+
+    <input id="scrubber" type="range" min="0" max="0" value="0" step="1" />
+    <div id="frame-readout">frame 0 / 0 · 0:00:00</div>
+    <div id="conn-status" class="conn-status">connecting…</div>
+  </div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
