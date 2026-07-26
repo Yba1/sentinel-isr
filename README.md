@@ -14,12 +14,20 @@ Identity is never used for association — recovering it from kinematics alone i
 
 | Phase | Module | State |
 |---|---|---|
-| 1 | `tracker/kalman.py` — constant-velocity Kalman filter | **done**, 27 tests |
-| 2 | `tracker/assoc.py`, `tracker/metrics.py` — gating, NLL cost, padded Hungarian, lifecycle | **done**, 95 tests |
-| 3 | Hypothesis branching as Jac walker spawning | not started |
-| 4 | Geofence intrusion + dark-vessel re-association | not started |
+| 1 | `tracker/kalman.py` — constant-velocity Kalman filter | **done** |
+| 2 | `tracker/assoc.py`, `tracker/metrics.py` — gating, NLL cost, padded Hungarian, lifecycle | **done** |
+| 3 | `jac/hypothesis.jac` — hypothesis branching as Jac walker spawning | **done** |
+| 3.5 | `tracker/geofence.py`, `jac/geofence.jac`, `jac/fences.jac` — geofence intrusion | **done** |
+| 4 | `tracker/dark.py` — dark-vessel prediction and re-association | **done** |
+| 5 | `jac/jtms.jac` — JTMS retraction (Doyle 1979), `jac/brief.jac` — brief panel + LLM polish | **done** |
 
-122 tests total, all passing.
+Also shipped, not in the original phase list: `tracker/eval.py` / `jac/eval.jac` (scenario
+regression harness) and `tracker/contracts.py` / `jac/contracts.jac` (cross-teammate contract
+reconciliation — kind vocabulary, field-name aliasing, origin/bbox/epoch parsing).
+
+686 tests total, all passing. Jac share of product code (`jac/` + `tracker/`): **~60%**,
+excluding tests from the denominator (see `docs/partial-submission-checklist.md` for the
+open question of whether tests count toward the 40% floor).
 
 ## Phase 2 acceptance
 
@@ -110,4 +118,6 @@ selection matrix `H`.
 python -m pytest tests/ -q
 ```
 
-Requires Python 3.11, numpy, scipy, pytest. No API keys, no network.
+Requires **Python 3.12+** (`jaclang` uses `typing.override`, 3.12-only — see `JAC_SETUP.md`),
+numpy, scipy, shapely, pytest, jaclang. `by llm()` calls fall back to a deterministic template
+with no key and no network — see `jac/brief.jac`.
