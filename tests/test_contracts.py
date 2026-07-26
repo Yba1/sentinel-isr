@@ -82,6 +82,42 @@ def test_contract_error_is_a_value_error():
     assert issubclass(ContractError, ValueError)
 
 
+def test_contracts_is_a_thin_shim_backed_by_the_jac_module():
+    """tracker.contracts must be a genuine re-export of jac/contracts.jac, not
+    a cosmetic duplicate that happens to sit unused. Prove the function
+    objects tracker.contracts hands out actually live in the .jac module."""
+    import jaclang  # noqa: F401  -- registers the .jac import hook
+
+    import jac.contracts as jac_contracts
+    import tracker.contracts as py_contracts
+
+    assert jac_contracts.__file__.endswith(".jac")
+    # Same underlying callables -- not re-implemented, re-exported.
+    assert py_contracts.normalize_kind is jac_contracts.normalize_kind
+    assert py_contracts.parse_origin is jac_contracts.parse_origin
+    assert py_contracts.parse_bbox is jac_contracts.parse_bbox
+    assert py_contracts.parse_epoch is jac_contracts.parse_epoch
+    assert py_contracts.parse_time_window is jac_contracts.parse_time_window
+    assert py_contracts.resolve_field is jac_contracts.resolve_field
+    assert py_contracts.default_buffer_m is jac_contracts.default_buffer_m
+    assert py_contracts.namespaced_id is jac_contracts.namespaced_id
+    assert py_contracts.dedupe_ids is jac_contracts.dedupe_ids
+    assert py_contracts.assert_unique_ids is jac_contracts.assert_unique_ids
+    assert py_contracts.CANONICAL_KINDS is jac_contracts.CANONICAL_KINDS
+    assert py_contracts.KIND_ALIASES is jac_contracts.KIND_ALIASES
+    assert py_contracts.FIELD_ALIASES is jac_contracts.FIELD_ALIASES
+    assert (
+        py_contracts.DEFAULT_BUFFER_M_BY_KIND
+        is jac_contracts.DEFAULT_BUFFER_M_BY_KIND
+    )
+    # ContractError is the other direction: defined in tracker.contracts and
+    # resolved lazily (not imported at module load time -- see
+    # jac/contracts.jac's module docstring for why an eager import back is
+    # circular), so the same class is raised on both sides of the boundary.
+    assert jac_contracts.contract_error_type() is py_contracts.ContractError
+    assert isinstance(jac_contracts.contract_error("x"), py_contracts.ContractError)
+
+
 # ==========================================================================
 # 1. kind vocabulary
 # ==========================================================================

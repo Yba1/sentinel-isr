@@ -823,6 +823,47 @@ def test_pack_result_counts_sum_to_the_number_of_checks() -> None:
     assert res.passed + res.failed + res.skipped == len(res.checks)
 
 
+# --------------------------------------------------------------------------- #
+# the Jac orchestration seam: CHECKERS / PACK_CHECKS are plain, callable, and
+# read live from tracker.eval by the Jac side (not captured once at import).
+# --------------------------------------------------------------------------- #
+
+
+def test_checkers_registry_values_are_all_plain_callables() -> None:
+    for key, checker in CHECKERS.items():
+        assert callable(checker), f"CHECKERS[{key!r}] is not callable"
+
+
+def test_pack_checks_tuple_values_are_all_plain_callables() -> None:
+    import tracker.eval as ev
+
+    for pack_check in ev.PACK_CHECKS:
+        assert callable(pack_check)
+
+
+def test_jac_eval_module_is_importable_and_backs_the_public_api() -> None:
+    """The orchestration genuinely lives in jac/eval.jac, not a Python shadow."""
+    import jaclang  # noqa: F401  registers the .jac meta importer
+    from jac.eval import evaluate_pack_core, discover_packs as jac_discover_packs
+
+    assert callable(evaluate_pack_core)
+    # tracker.eval's discover_packs is a thin wrapper over the same Jac function.
+    assert discover_packs(None) == jac_discover_packs(None)
+
+
+def test_two_not_built_checkers_are_independent_closures() -> None:
+    """Each not-built key gets its own capability message, not a shared one."""
+    assert CHECKERS["ofac_hit"] is not CHECKERS["relink_same_track"]
+    # CHECKERS values are the raw Jac checker functions: each returns a plain
+    # dict (key/outcome/detail/expected/actual/marginal), not a CheckResult --
+    # tracker.eval.evaluate_pack is what wraps that into the dataclass.
+    a = CHECKERS["ofac_hit"](True, {}, None)
+    b = CHECKERS["relink_same_track"](True, {}, None)
+    assert a["detail"] != b["detail"]
+    assert "OFAC" in a["detail"]
+    assert "relink" in b["detail"].lower()
+
+
 # =========================================================================== #
 # pack-level check: referenced files must exist
 # =========================================================================== #
