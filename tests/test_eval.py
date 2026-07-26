@@ -17,10 +17,17 @@ import pytest
 from tracker.eval import (
     CHECKERS,
     FAIL,
+    MARGIN_WARN_FRAC,
     OFFSET_TOLERANCE_FRAC,
     PASS,
     SKIP,
     CheckResult,
+    _bbox_bounds,
+    _collect_file_refs,
+    _ellipsoidal_km,
+    _haversine_km,
+    _parse_epoch,
+    _window_bounds,
     discover_packs,
     evaluate_all,
     evaluate_pack,
@@ -141,13 +148,35 @@ def good_s01_results() -> dict:
     }
 
 
-def write_pack(root: Path, pack: dict, *, dirname: str | None = None) -> Path:
-    """Write ``pack`` to ``<root>/scenarios/<dirname>/pack.json``."""
+def write_pack(
+    root: Path, pack: dict, *, dirname: str | None = None, create_refs: bool = True
+) -> Path:
+    """Write ``pack`` to ``<root>/scenarios/<dirname>/pack.json``.
+
+    By default the files the pack references (``geofence_layers[].file`` and
+    friends) are created alongside it, because a pack on disk that points at a
+    file that is not there is now itself a finding -- see
+    ``packcheck_referenced_files``. Pass ``create_refs=False`` to write a pack
+    with dangling references on purpose.
+    """
     d = root / "scenarios" / (dirname or str(pack["id"]))
     d.mkdir(parents=True, exist_ok=True)
     path = d / "pack.json"
     path.write_text(json.dumps(pack, indent=2), encoding="utf-8")
+    if create_refs:
+        for ref in referenced_paths(pack):
+            target = d / ref
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                target.write_text("{}", encoding="utf-8")
     return path
+
+
+def referenced_paths(pack: dict) -> list[str]:
+    """Every file path the pack references, using the harness's own walker."""
+    found: list[tuple[str, str]] = []
+    _collect_file_refs(pack, found)
+    return [ref for _, ref in found]
 
 
 def outcomes(result) -> dict[str, str]:
@@ -569,7 +598,11 @@ def test_pack_with_no_expected_block_skips_rather_than_crashing() -> None:
     del pack["expected"]
     res = evaluate_pack(pack)
     assert res.failed == 0
-    assert res.skipped == 1
+    # One SKIP for the absent `expected` block, plus one for the pack-level
+    # referenced-files check: this dict was never loaded from disk, so its
+    # geofence layer path cannot be resolved against anything.
+    assert res.skipped == 2
+    assert outcomes(res)["referenced_files"] == SKIP
 
 
 # --------------------------------------------------------------------------- #
@@ -590,7 +623,9 @@ def test_checker_that_raises_becomes_a_fail_and_the_run_continues(monkeypatch) -
     # every other key still got checked
     assert got["dark_at_s"] == PASS
     assert got["intrusion_fence"] == PASS
-    assert len(res.checks) == len(s01_pack()["expected"]) - 1  # minus notes
+    # minus notes, plus the pack-level referenced_files row appended at the end
+    assert len(res.checks) == len(s01_pack()["expected"]) - 1 + 1
+    assert res.checks[-1].key == "referenced_files"
 
 
 def test_checker_returning_the_wrong_type_becomes_a_fail(monkeypatch) -> None:
@@ -786,3 +821,471 @@ def test_check_result_is_frozen() -> None:
 def test_pack_result_counts_sum_to_the_number_of_checks() -> None:
     res = evaluate_pack(s01_pack())
     assert res.passed + res.failed + res.skipped == len(res.checks)
+
+
+# =========================================================================== #
+# pack-level check: referenced files must exist
+# =========================================================================== #
+
+
+def test_referenced_file_that_exists_passes(tmp_path: Path) -> None:
+    """s01 points at layers/monterey_bay_nms.geojson, which really is there."""
+    write_pack(tmp_path, s01_pack())  # create_refs=True writes the layer file
+    res = evaluate_all(tmp_path)[0]
+    assert outcomes(res)["referenced_files"] == PASS
+    assert "layers/monterey_bay_nms.geojson" in detail_of(res, "referenced_files")
+    assert res.failed == 0
+
+
+def test_missing_referenced_file_fails_naming_path_and_resolved_dir(tmp_path: Path) -> None:
+    path = write_pack(tmp_path, s01_pack(), create_refs=False)
+    res = evaluate_all(tmp_path)[0]
+    detail = detail_of(res, "referenced_files")
+    assert outcomes(res)["referenced_files"] == FAIL
+    assert "layers/monterey_bay_nms.geojson" in detail
+    assert "MISSING" in detail
+    # the directory the path was resolved against must be named
+    assert path.parent.name in detail
+    assert res.ok is False
+
+
+def test_missing_referenced_file_is_visible_in_the_rendered_report(tmp_path: Path) -> None:
+    """The missing path must survive detail elision -- it is the whole point."""
+    write_pack(tmp_path, s01_pack(), create_refs=False)
+    text = format_report(evaluate_all(tmp_path), use_colour=False)
+    assert "MISSING layers/monterey_bay_nms.geojson" in text
+    assert "referenced_files" in text
+    # the resolved directory is the other half of the finding; it must survive too
+    assert "resolved against" in text
+    assert "s01_dark_in_sanctuary" in text
+
+
+def test_file_refs_are_found_at_any_depth_and_under_several_key_names(tmp_path: Path) -> None:
+    pack = s01_pack()
+    pack["ais"] = {"file": "ais_window.csv"}
+    pack["watchlists"] = [{"csv": "ofac/subset.csv"}, {"path": "deep/nested/thing.geojson"}]
+    write_pack(tmp_path, pack, create_refs=False)
+    detail = detail_of(evaluate_all(tmp_path)[0], "referenced_files")
+    for ref in ("ais_window.csv", "ofac/subset.csv", "deep/nested/thing.geojson"):
+        assert ref in detail
+
+
+def test_partially_present_refs_report_the_ratio(tmp_path: Path) -> None:
+    pack = s01_pack()
+    pack["ais"] = {"file": "ais_window.csv"}
+    d = tmp_path / "scenarios" / pack["id"]
+    write_pack(tmp_path, pack, create_refs=False)
+    (d / "layers").mkdir(parents=True, exist_ok=True)
+    (d / "layers" / "monterey_bay_nms.geojson").write_text("{}", encoding="utf-8")
+    res = evaluate_all(tmp_path)[0]
+    detail = detail_of(res, "referenced_files")
+    assert outcomes(res)["referenced_files"] == FAIL
+    assert "ais_window.csv" in detail
+    assert "1/2" in detail
+
+
+def test_dict_loaded_pack_with_refs_skips_instead_of_crashing() -> None:
+    """No source path means nothing to resolve against. SKIP, never a raise."""
+    res = evaluate_pack(s01_pack())
+    assert outcomes(res)["referenced_files"] == SKIP
+    detail = detail_of(res, "referenced_files")
+    assert "no source path" in detail
+    assert res.failed == 0
+
+
+def test_pack_with_no_file_refs_at_all_gets_no_referenced_files_row() -> None:
+    assert "referenced_files" not in outcomes(evaluate_pack(s02_pack()))
+    assert "referenced_files" not in outcomes(evaluate_pack(s03_pack()))
+
+
+def test_url_valued_ref_is_not_treated_as_a_local_path(tmp_path: Path) -> None:
+    pack = s02_pack()
+    pack["source"] = "https://example.org/ais/feed.csv"
+    write_pack(tmp_path, pack, create_refs=False)
+    assert "referenced_files" not in outcomes(evaluate_all(tmp_path)[0])
+
+
+def test_collect_file_refs_ignores_the_private_source_path_key(tmp_path: Path) -> None:
+    pack = load_pack(write_pack(tmp_path, s01_pack()))
+    refs = []
+    _collect_file_refs(pack, refs)
+    assert [r for _, r in refs] == ["layers/monterey_bay_nms.geojson"]
+
+
+# =========================================================================== #
+# pack-level check: path-looking tokens in free-text notes
+# =========================================================================== #
+
+
+def s03_pack_with_stale_note_path() -> dict:
+    """s03 as committed: notes point at geo/ofac_sdn_vessels_subset.csv, while
+    the csv is actually a sibling of pack.json, not under geo/."""
+    pack = s03_pack()
+    pack["expected"]["notes"] = (
+        "mmsi:572469210 / ARTAVIL is a real OFAC SDN vessel entry (Iran program, "
+        "crude/oil tanker) pulled into geo/ofac_sdn_vessels_subset.csv"
+    )
+    return pack
+
+
+def test_stale_path_in_notes_is_a_skip_that_says_it_may_be_stale(tmp_path: Path) -> None:
+    d = tmp_path / "scenarios" / "s03_ghost_fleet"
+    write_pack(tmp_path, s03_pack_with_stale_note_path())
+    (d / "ofac_sdn_vessels_subset.csv").write_text("mmsi,name\n", encoding="utf-8")
+    res = evaluate_all(tmp_path)[0]
+    assert outcomes(res)["free_text_paths"] == SKIP
+    detail = detail_of(res, "free_text_paths")
+    assert "geo/ofac_sdn_vessels_subset.csv" in detail
+    assert "may be stale" in detail
+    # free text must never turn a pack red
+    assert res.failed == 0
+    assert res.ok is True
+
+
+def test_prose_with_a_slash_but_no_extension_is_not_a_path(tmp_path: Path) -> None:
+    """'crude/oil tanker' is English, not a filename."""
+    pack = s03_pack()
+    pack["expected"]["notes"] = "a crude/oil tanker, re-flagged mid-replay"
+    write_pack(tmp_path, pack)
+    assert "free_text_paths" not in outcomes(evaluate_all(tmp_path)[0])
+
+
+def test_note_path_that_really_exists_produces_no_row(tmp_path: Path) -> None:
+    pack = s03_pack()
+    pack["expected"]["notes"] = "pulled from geo/ofac_sdn_vessels_subset.csv"
+    d = tmp_path / "scenarios" / pack["id"]
+    write_pack(tmp_path, pack)
+    (d / "geo").mkdir(parents=True, exist_ok=True)
+    (d / "geo" / "ofac_sdn_vessels_subset.csv").write_text("mmsi,name\n", encoding="utf-8")
+    res = evaluate_all(tmp_path)[0]
+    assert "free_text_paths" not in outcomes(res)  # pinned: no row, not a PASS
+
+
+def test_free_text_row_never_prints_the_word_the_report_forbids(tmp_path: Path) -> None:
+    """The report test asserts `notes` never appears; this row must not smuggle
+    it back in. Both branches are exercised: on-disk (what the projector shows)
+    and dict-loaded (no source path)."""
+    write_pack(tmp_path, s03_pack_with_stale_note_path())
+    on_disk = format_report(evaluate_all(tmp_path), use_colour=False)
+    assert "free_text_paths" in on_disk
+    assert "notes" not in on_disk
+
+    dict_loaded = evaluate_pack(s03_pack_with_stale_note_path())
+    assert outcomes(dict_loaded)["free_text_paths"] == SKIP
+    assert "no source path" in detail_of(dict_loaded, "free_text_paths")
+    assert "notes" not in format_report([dict_loaded], use_colour=False)
+
+
+# =========================================================================== #
+# min_separation_km: margins, both earth models, the replay caveat
+# =========================================================================== #
+
+
+def test_comfortable_margin_passes_and_is_not_marginal() -> None:
+    pack = s02_pack()
+    pack["expected"]["min_separation_km"] = 30.0  # actual is ~39.92 km
+    res = evaluate_pack(pack)
+    check = next(c for c in res.checks if c.key == "min_separation_km")
+    assert check.outcome == PASS
+    assert check.marginal is False
+    assert res.marginal == 0
+    assert "MARGIN" not in check.detail
+    assert "margin" in check.detail  # the margin is still reported
+    assert "haversine" in check.detail
+
+
+def test_knifeedge_margin_passes_but_is_flagged_marginal() -> None:
+    """s02 as written: 39.9 km required, ~39.924 km actual -- 24 m of margin."""
+    res = evaluate_pack(s02_pack())
+    check = next(c for c in res.checks if c.key == "min_separation_km")
+    assert check.outcome == PASS
+    assert check.marginal is True
+    assert res.marginal == 1
+    assert "MARGIN" in check.detail
+    assert "earth-model dependent" in check.detail
+    assert "24 m" in check.detail
+    assert "haversine" in check.detail and "6371.0088" in check.detail
+
+
+def test_marginal_does_not_affect_the_exit_code(tmp_path: Path, capsys) -> None:
+    write_pack(tmp_path, s02_pack())
+    assert main(["--all", "--root", str(tmp_path), "--colour", "never"]) == 0
+    out = capsys.readouterr().out
+    assert "1 marginal" in out
+    assert "0 failed" in out
+
+
+def test_marginal_appears_in_the_json_summary(tmp_path: Path, capsys) -> None:
+    write_pack(tmp_path, s02_pack())
+    assert main(["--json", "--root", str(tmp_path)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"]["marginal"] == 1
+    assert payload["summary"]["failed"] == 0
+    row = next(c for p in payload["packs"] for c in p["checks"] if c["key"] == "min_separation_km")
+    assert row["marginal"] is True
+    assert row["outcome"] == PASS
+
+
+def test_margin_threshold_boundary_is_one_percent() -> None:
+    """Just inside 1% is marginal; comfortably outside it is not."""
+    actual = _haversine_km((36.6, -121.9), (36.95, -122.0))
+
+    marginal_pack = s02_pack()
+    marginal_pack["expected"]["min_separation_km"] = actual / (1.0 + MARGIN_WARN_FRAC * 0.5)
+    assert (
+        next(c for c in evaluate_pack(marginal_pack).checks if c.key == "min_separation_km").marginal
+        is True
+    )
+
+    roomy_pack = s02_pack()
+    roomy_pack["expected"]["min_separation_km"] = actual / (1.0 + MARGIN_WARN_FRAC * 2.0)
+    assert (
+        next(c for c in evaluate_pack(roomy_pack).checks if c.key == "min_separation_km").marginal
+        is False
+    )
+
+
+def test_separation_genuinely_below_the_requirement_still_fails() -> None:
+    pack = s02_pack()
+    pack["expected"]["min_separation_km"] = 100.0
+    res = evaluate_pack(pack)
+    check = next(c for c in res.checks if c.key == "min_separation_km")
+    assert check.outcome == FAIL
+    assert "SHORT" in check.detail
+    assert check.marginal is False
+    assert res.ok is False
+
+
+def test_two_earth_models_straddling_the_threshold_are_reported() -> None:
+    """The sharpest statement of the s02 problem: the models disagree."""
+    res = evaluate_pack(s02_pack())
+    detail = detail_of(res, "separation_earth_model")
+    assert outcomes(res)["separation_earth_model"] == SKIP
+    assert "STRADDLE" in detail
+    assert "WGS-84" in detail and "sphere" in detail
+
+
+def test_agreeing_earth_models_say_so() -> None:
+    pack = s02_pack()
+    pack["expected"]["min_separation_km"] = 10.0
+    detail = detail_of(evaluate_pack(pack), "separation_earth_model")
+    assert "models agree" in detail
+    assert "STRADDLE" not in detail
+
+
+def test_ellipsoidal_model_is_a_different_answer_from_the_sphere() -> None:
+    a, b = (36.6, -121.9), (36.95, -122.0)
+    sphere, ellipsoid = _haversine_km(a, b), _ellipsoidal_km(a, b)
+    assert ellipsoid < sphere  # WGS-84 is smaller here, by tens of metres
+    assert 39.80 < ellipsoid < 39.90
+    assert 39.90 < sphere < 39.95
+    assert abs(sphere - ellipsoid) * 1000.0 > 50.0
+
+
+def test_replay_minimum_is_recorded_as_not_derivable() -> None:
+    res = evaluate_pack(s02_pack())
+    assert outcomes(res)["separation_over_replay"] == SKIP
+    detail = detail_of(res, "separation_over_replay")
+    assert "t=0" in detail
+    assert "not derivable" in detail
+
+
+def test_separation_companion_rows_absent_when_the_key_is_absent() -> None:
+    pack = s02_pack()
+    del pack["expected"]["min_separation_km"]
+    got = outcomes(evaluate_pack(pack))
+    assert "separation_earth_model" not in got
+    assert "separation_over_replay" not in got
+
+
+# =========================================================================== #
+# both contract spellings: time windows and bbox
+# =========================================================================== #
+
+
+def test_parse_epoch_treats_a_naive_iso_string_as_utc() -> None:
+    """A local-timezone regression must fail here, so pin the exact epoch."""
+    epoch, error = _parse_epoch("2024-06-15T06:00:00")
+    assert error is None
+    assert epoch == 1718431200.0  # 2024-06-15T06:00:00Z
+    assert _parse_epoch("2024-06-15T06:00:00Z")[0] == 1718431200.0
+    assert _parse_epoch("2024-06-15T06:00:00+00:00")[0] == 1718431200.0
+
+
+def test_parse_epoch_accepts_numbers_and_rejects_nonsense() -> None:
+    assert _parse_epoch(1718431200)[0] == 1718431200.0
+    assert _parse_epoch(1718431200.5)[0] == 1718431200.5
+    assert _parse_epoch("half past three")[0] is None
+    assert "ISO-8601" in _parse_epoch("half past three")[1]
+    assert _parse_epoch(None)[0] is None
+    assert _parse_epoch(True)[0] is None  # bool is an int, but not a time
+
+
+@pytest.mark.parametrize(
+    "window",
+    [
+        {"start": "2024-06-15T06:00:00+00:00", "end": "2024-06-15T08:00:00+00:00"},
+        {"start": "2024-06-15T06:00:00Z", "end": "2024-06-15T08:00:00Z"},
+        {"start": "2024-06-15T06:00:00", "end": "2024-06-15T08:00:00"},
+        {"start_t": 1718431200, "end_t": 1718438400},
+        {"start": 1718431200.0, "end": 1718438400.0},
+    ],
+)
+def test_timing_checks_accept_every_window_spelling(window: dict) -> None:
+    """The same 7200 s window five ways; the timings must pass in all of them."""
+    pack = s01_pack()
+    pack["time_window"] = window
+    res = evaluate_pack(pack)
+    got = outcomes(res)
+    for key in ("sanctuary_entry_s", "dark_at_s", "radar_contact_at_s"):
+        assert got[key] == PASS, f"{key} failed for window {window}"
+    assert "in window (0-7200s)" in detail_of(res, "dark_at_s")
+
+
+def test_epoch_window_still_catches_an_out_of_window_timing() -> None:
+    pack = s01_pack()
+    pack["time_window"] = {"start_t": 1718431200, "end_t": 1718438400}
+    pack["expected"]["radar_contact_at_s"] = 9999.0
+    res = evaluate_pack(pack)
+    assert outcomes(res)["radar_contact_at_s"] == FAIL
+    assert "OUTSIDE" in detail_of(res, "radar_contact_at_s")
+
+
+def test_window_bounds_reads_a_bare_start_t_end_t_at_the_pack_root() -> None:
+    bounds, error = _window_bounds({"start_t": 100.0, "end_t": 460.0})
+    assert error is None
+    assert bounds == (100.0, 460.0)
+
+
+def test_window_bounds_reads_an_ais_window() -> None:
+    bounds, error = _window_bounds({"ais_window": {"start_t": 0.0, "end_t": 60.0}})
+    assert error is None
+    assert bounds == (0.0, 60.0)
+
+
+def test_unparseable_time_value_fails_the_check_without_raising() -> None:
+    """One end parses, the other is garbage: a claim the pack gets wrong."""
+    pack = s01_pack()
+    pack["time_window"] = {"start": "2024-06-15T06:00:00Z", "end": "half past three"}
+    res = evaluate_pack(pack)  # must not raise
+    assert outcomes(res)["dark_at_s"] == FAIL
+    detail = detail_of(res, "dark_at_s")
+    assert "unparseable" in detail
+    assert "half past three" in detail
+
+
+def test_unparseable_epoch_key_also_fails() -> None:
+    pack = s01_pack()
+    pack["time_window"] = {"start_t": 0.0, "end_t": "banana"}
+    res = evaluate_pack(pack)
+    assert outcomes(res)["dark_at_s"] == FAIL
+    assert "end_t" in detail_of(res, "dark_at_s")
+
+
+def test_wholly_unparseable_window_stays_lenient() -> None:
+    """Preserved on purpose: a pack speaking no time dialect this harness knows
+    cannot have its timings range-checked, so the check is omitted, not failed."""
+    pack = s01_pack()
+    pack["time_window"] = {"start": "not-a-date", "end": "also-not"}
+    res = evaluate_pack(pack)
+    assert outcomes(res)["dark_at_s"] == PASS
+    assert "not parseable" in detail_of(res, "dark_at_s")
+
+
+def test_bbox_array_and_object_forms_agree() -> None:
+    array_form = {"bbox": [-123.2, 35.4, -121.0, 38.0]}
+    object_form = {"bbox": {"lon_min": -123.2, "lat_min": 35.4, "lon_max": -121.0, "lat_max": 38.0}}
+    assert _bbox_bounds(array_form) == _bbox_bounds(object_form)
+    assert _bbox_bounds(array_form)[0] == (-123.2, 35.4, -121.0, 38.0)
+    assert _bbox_bounds({})[0] is None
+
+
+@pytest.mark.parametrize(
+    "bbox",
+    [
+        [-123.2, 35.4, -121.0, 38.0],
+        {"lon_min": -123.2, "lat_min": 35.4, "lon_max": -121.0, "lat_max": 38.0},
+    ],
+)
+def test_both_bbox_spellings_pass_the_pack_level_check(bbox) -> None:
+    pack = s01_pack()
+    pack["bbox"] = bbox
+    res = evaluate_pack(pack)
+    assert outcomes(res)["bbox"] == PASS
+    assert "lon -123.2..-121" in detail_of(res, "bbox")
+
+
+def test_inverted_bbox_fails_in_either_spelling() -> None:
+    pack = s01_pack()
+    pack["bbox"] = [-121.0, 35.4, -123.2, 38.0]  # lon_min east of lon_max
+    res = evaluate_pack(pack)
+    assert outcomes(res)["bbox"] == FAIL
+    assert "west of" in detail_of(res, "bbox")
+
+    pack["bbox"] = {"lon_min": -123.2, "lat_min": 38.0, "lon_max": -121.0, "lat_max": 35.4}
+    assert outcomes(evaluate_pack(pack))["bbox"] == FAIL
+
+
+def test_malformed_bbox_fails_rather_than_raising() -> None:
+    pack = s01_pack()
+    pack["bbox"] = [-123.2, 35.4, -121.0]
+    assert outcomes(evaluate_pack(pack))["bbox"] == FAIL
+    pack["bbox"] = {"lon_min": -123.2, "lat_min": 35.4}
+    assert outcomes(evaluate_pack(pack))["bbox"] == FAIL
+    pack["bbox"] = "the whole ocean"
+    res = evaluate_pack(pack)
+    assert outcomes(res)["bbox"] == FAIL
+    assert "expected an array of 4 or an object" in detail_of(res, "bbox")
+
+
+def test_pack_without_bbox_gets_no_bbox_row() -> None:
+    assert "bbox" not in outcomes(evaluate_pack(s01_pack()))
+
+
+# =========================================================================== #
+# pack-level checks are contained the same way keyed checkers are
+# =========================================================================== #
+
+
+def test_a_raising_pack_check_becomes_a_fail_and_the_run_continues(monkeypatch) -> None:
+    import tracker.eval as ev
+
+    def exploding(pack):
+        raise RuntimeError("boom: pack walker fell over")
+
+    monkeypatch.setattr(ev, "PACK_CHECKS", (exploding, ev.packcheck_bbox))
+    pack = s01_pack()
+    pack["bbox"] = [-123.2, 35.4, -121.0, 38.0]
+    res = evaluate_pack(pack)
+    details = " ".join(c.detail for c in res.checks)
+    assert "boom: pack walker fell over" in details
+    assert "RuntimeError" in details
+    assert outcomes(res)["bbox"] == PASS  # the next pack check still ran
+    assert outcomes(res)["dark_actor"] == PASS  # and the keyed checks are intact
+
+
+def test_pack_level_rows_come_after_the_expected_rows(tmp_path: Path) -> None:
+    pack = s01_pack()
+    pack["bbox"] = [-123.2, 35.4, -121.0, 38.0]
+    write_pack(tmp_path, pack)
+    keys = [c.key for c in evaluate_all(tmp_path)[0].checks]
+    assert keys[0] == "id_switches_max"  # first key of the expected block
+    assert keys[-2:] == ["referenced_files", "bbox"]
+
+
+def test_stale_note_path_and_its_verdict_survive_elision_in_the_report(tmp_path: Path) -> None:
+    """Both halves of the row -- the path and "may be stale" -- must reach the
+    projector, not be cut off by the detail width limit."""
+    write_pack(tmp_path, s03_pack_with_stale_note_path())
+    text = format_report(evaluate_all(tmp_path), use_colour=False)
+    assert "geo/ofac_sdn_vessels_subset.csv" in text
+    assert "may be stale" in text
+
+
+def test_straddle_verdict_survives_elision_in_the_report(tmp_path: Path) -> None:
+    write_pack(tmp_path, s02_pack())
+    text = format_report(evaluate_all(tmp_path), use_colour=False)
+    assert "STRADDLE" in text
+    assert "WGS-84 39.853 km" in text
+    assert "MARGIN 24 m" in text
+    assert "haversine R=6371.0088 km" in text

@@ -12,6 +12,7 @@ import time
 import numpy as np
 import pytest
 
+from tracker import contracts
 from tracker.geofence import (
     CANONICAL_KINDS,
     EARTH_RADIUS_M,
@@ -19,6 +20,7 @@ from tracker.geofence import (
     Geofence,
     GeofenceContractError,
     GeofenceIndex,
+    build_index,
     corridor_fence,
     geofence_from_mapping,
     geofence_from_ring,
@@ -490,14 +492,25 @@ def test_from_mapping_abhi_dataclass_shape():
     assert GeofenceIndex([f]).query([0.0, 0.0]) == ["f_abhi"]
 
 
-def test_from_mapping_abhi_shape_buffer_must_be_passed_for_corridors():
-    # The merge hazard, pinned: his dataclass carries no buffer_m, so a cable
-    # layer imported through it gets 0.0 unless the caller says otherwise.
+def test_from_mapping_abhi_shape_defaults_buffer_from_contracts():
+    # UPDATED (was test_from_mapping_abhi_shape_buffer_must_be_passed_for_corridors):
+    # that test pinned the exact zero-buffered-cable trap the contracts.py
+    # reconciliation exists to close -- his dataclass carries no buffer_m field
+    # at all, and defaulting it to a hardcoded 0.0 made a cable layer imported
+    # through this shape a zero-area line that could never contain anything.
+    # The corrected behaviour: absence now falls back to
+    # contracts.default_buffer_m(kind), which is 500.0 for cable.
     obj = _AbhiGeofence("cab", "Cable Corridor", "cable", _square(0.0, 0.0, 1000.0))
-    assert geofence_from_mapping(obj).buffer_m == 0.0
-    assert geofence_from_mapping(obj, buffer_m=500.0).buffer_m == 500.0
-    assert GeofenceIndex([geofence_from_mapping(obj)]).query([1200.0, 0.0]) == []
-    widened = geofence_from_mapping(obj, buffer_m=500.0)
+    assert geofence_from_mapping(obj).buffer_m == 500.0
+    assert GeofenceIndex([geofence_from_mapping(obj)]).query([1200.0, 0.0]) == ["cab"]
+
+    # The buffer_m= argument still overrides the default in either direction.
+    assert geofence_from_mapping(obj, buffer_m=0.0).buffer_m == 0.0
+    assert GeofenceIndex([geofence_from_mapping(obj, buffer_m=0.0)]).query(
+        [1200.0, 0.0]
+    ) == []
+    widened = geofence_from_mapping(obj, buffer_m=1500.0)
+    assert widened.buffer_m == 1500.0
     assert GeofenceIndex([widened]).query([1200.0, 0.0]) == ["cab"]
 
 
@@ -970,3 +983,160 @@ def test_real_layers_compose_in_one_index():
     assert len(hits) >= 1
     assert all(idx.get(h) is not None for h in hits)
     assert idx.query(lonlat_to_enu([OPEN_OCEAN_LONLAT], ORIGIN)[0]) == []
+
+
+# ==========================================================================
+# CONTRACTS RECONCILIATION -- geofence.py and tracker.contracts must agree
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+# "land" is a real fifth kind now, not a workaround
+# --------------------------------------------------------------------------
+
+@_requires("ca_coastline_10m.geojson")
+def test_load_real_ca_coastline_as_land_kind():
+    # THE GAP THIS CLOSES: geofence.CANONICAL_KINDS used to be the old 4-tuple
+    # and normalize_kind raised on "land"/"coastline", so a coastline layer had
+    # to be forced through as kind="danger" as a workaround. It now comes from
+    # tracker.contracts (a 5-tuple including "land") and this succeeds directly.
+    fences = load_geojson_fences(_geo("ca_coastline_10m.geojson"), ORIGIN, kind="land")
+    assert len(fences) == 2
+    assert {f.kind for f in fences} == {"land"}
+    assert all(f.geom.area > 0.0 for f in fences)
+    assert len({f.id for f in fences}) == 2
+
+    idx = GeofenceIndex(fences)
+    assert idx.query(lonlat_to_enu([OPEN_OCEAN_LONLAT], ORIGIN)[0]) == []
+
+
+@_requires("ca_coastline_10m.geojson")
+def test_load_real_ca_coastline_danger_workaround_still_works():
+    # The old workaround (kind="danger") must keep working -- additive only.
+    fences = load_geojson_fences(_geo("ca_coastline_10m.geojson"), ORIGIN,
+                                 kind="danger")
+    assert {f.kind for f in fences} == {"danger"}
+
+
+def test_kind_vocabulary_includes_land_and_all_its_aliases():
+    assert "land" in CANONICAL_KINDS
+    for alias in ("land", "coastline", "coast", "shore", "shoreline",
+                  "landmask", "terrain"):
+        assert normalize_kind(alias) == "land"
+
+
+# --------------------------------------------------------------------------
+# GeofenceContractError isa contracts.ContractError
+# --------------------------------------------------------------------------
+
+def test_geofence_contract_error_is_a_contracts_contract_error():
+    assert issubclass(GeofenceContractError, contracts.ContractError)
+    assert issubclass(GeofenceContractError, ValueError)
+
+    with pytest.raises(contracts.ContractError):
+        normalize_kind("not_a_real_kind")
+
+    with pytest.raises(contracts.ContractError):
+        geofence_from_mapping({"kind": "mpa", "label": "F",
+                               "polygon": _square(0.0, 0.0, 1000.0)})
+
+
+# --------------------------------------------------------------------------
+# geofence_from_mapping: buffer_m aliases from contracts.FIELD_ALIASES
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("buffer_key", ["buffer_m", "buffer", "bufferMeters"])
+def test_from_mapping_buffer_field_aliases(buffer_key):
+    m = {"id": "cab", "kind": "cable", "label": "Cable",
+         "polygon": _square(0.0, 0.0, 1000.0), buffer_key: 500.0}
+    f = geofence_from_mapping(m)
+    assert f.buffer_m == 500.0
+    assert GeofenceIndex([f]).query([1200.0, 0.0]) == ["cab"]
+
+
+# --------------------------------------------------------------------------
+# geofence_from_mapping: default_buffer_m fallback, not a hardcoded 0.0
+# --------------------------------------------------------------------------
+
+def test_from_mapping_no_buffer_field_defaults_by_kind():
+    cable = geofence_from_mapping({"id": "cab", "kind": "cable", "label": "Cable",
+                                   "polygon": _square(0.0, 0.0, 1000.0)})
+    assert cable.buffer_m == 500.0                    # contracts.default_buffer_m("cable")
+    assert GeofenceIndex([cable]).query([1200.0, 0.0]) == ["cab"]
+
+    mpa = geofence_from_mapping({"id": "m", "kind": "mpa", "label": "MPA",
+                                 "polygon": _square(0.0, 0.0, 1000.0)})
+    assert mpa.buffer_m == 0.0                        # contracts.default_buffer_m("mpa")
+    assert GeofenceIndex([mpa]).query([1200.0, 0.0]) == []
+
+
+def test_from_mapping_raw_line_geometry_still_requires_explicit_buffer():
+    # The per-kind default is deliberately NOT applied when the caller hands
+    # in a raw, zero-area shapely LineString -- that is still a REQUIRED,
+    # explicit ask (pinned by test_from_mapping_line_geometry_requires_buffer
+    # above). Confirms the default fallback (previous test) does not leak into
+    # this stricter path just because the kind is "cable".
+    from shapely.geometry import LineString
+
+    line = LineString([(0.0, 0.0), (10000.0, 0.0)])
+    with pytest.raises(GeofenceContractError, match="zero-area"):
+        geofence_from_mapping({"id": "c", "kind": "cable", "label": "C", "geom": line})
+
+
+# --------------------------------------------------------------------------
+# load_geojson_fences: layer namespacing (fixes the id-collision hazard)
+# --------------------------------------------------------------------------
+
+def _poly_geojson(tmp_path, name, poly_id):
+    ring = _lonlat_square(-122.0, 36.7, 0.1)
+    return _write_geojson(tmp_path, name, {
+        "type": "Feature",
+        "properties": {"kind": "mpa", "POLY_ID": poly_id},
+        "geometry": {"type": "Polygon", "coordinates": [ring]},
+    })
+
+
+def test_load_geojson_layer_none_keeps_old_unprefixed_ids(tmp_path):
+    path = _poly_geojson(tmp_path, "a.geojson", "1")
+    fences = load_geojson_fences(path, ORIGIN)          # layer=None, the default
+    assert fences[0].id == "1"
+
+
+def test_load_geojson_layer_namespaces_ids(tmp_path):
+    path = _poly_geojson(tmp_path, "b.geojson", "1")
+    fences = load_geojson_fences(path, ORIGIN, layer="monterey")
+    assert fences[0].id == contracts.namespaced_id("monterey", "1")
+    assert fences[0].id == "monterey:1"
+
+
+# --------------------------------------------------------------------------
+# build_index: the real fix for two layers colliding on the same bare id
+# --------------------------------------------------------------------------
+
+def test_build_index_namespaces_colliding_bare_ids(tmp_path):
+    a = _poly_geojson(tmp_path, "layer_a.geojson", "1")
+    b = _poly_geojson(tmp_path, "layer_b.geojson", "1")
+    fences_a = load_geojson_fences(a, ORIGIN)   # bare id "1"
+    fences_b = load_geojson_fences(b, ORIGIN)   # bare id "1", would collide
+
+    idx = build_index({"layer_a": fences_a, "layer_b": fences_b})
+    assert len(idx) == 2
+    ids = {f.id for f in idx.fences}
+    assert ids == {"layer_a:1", "layer_b:1"}
+    # Both distinctly reachable -- not one silently overwriting the other.
+    assert idx.get("layer_a:1").id == "layer_a:1"
+    assert idx.get("layer_b:1").id == "layer_b:1"
+
+
+def test_build_index_raises_on_colliding_already_namespaced_ids():
+    f1 = polygon_fence("dup:1", "mpa", "A", _square(0.0, 0.0, 1000.0))
+    f2 = polygon_fence("dup:1", "port", "B", _square(5000.0, 5000.0, 1000.0))
+    with pytest.raises(contracts.ContractError):
+        build_index({"x": [f1], "y": [f2]})
+
+
+def test_build_index_single_layer_matches_plain_index(tmp_path):
+    path = _poly_geojson(tmp_path, "solo.geojson", "42")
+    fences = load_geojson_fences(path, ORIGIN)
+    idx = build_index({"solo": fences})
+    assert len(idx) == 1
+    assert idx.fences[0].id == "solo:42"

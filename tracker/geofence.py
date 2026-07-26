@@ -55,24 +55,32 @@ this module      build-plan dict     Abhi (data/contracts.py)    resolved by
 ``label``        ``label``           ``name``                    ``geofence_from_mapping``
 ``kind``         ``type``            ``kind``                    ``normalize_kind``
 ``geom``         ``polygon``         ``ring`` (+ ``geojson``)     ``geofence_from_mapping``
-``buffer_m``     ``buffer_m``        *absent*                    defaults to ``0.0``
+``buffer_m``     ``buffer_m``        *absent*                    ``contracts.default_buffer_m``
 ===============  ==================  ==========================  ===================
 
 Field-name note: ``kind`` stays ``kind`` here. It already carries the build
-plan's *vocabulary* (mpa/cable/port/danger), ``type`` shadows a builtin, and
-Abhi chose ``kind`` independently -- two of three spellings agree.
+plan's *vocabulary* (mpa/cable/port/danger/land), ``type`` shadows a builtin,
+and Abhi chose ``kind`` independently -- two of three spellings agree.
 
-Kind vocabulary: Abhi's values ("sanctuary", "restricted", "anchorage", ...) are
-a different vocabulary for the same four concepts. :data:`KIND_ALIASES` maps them
-onto :data:`CANONICAL_KINDS`; see :func:`normalize_kind` for the unknown-input
-policy (it raises -- it never guesses).
+Kind vocabulary AND field-name reconciliation now live in
+:mod:`tracker.contracts` -- :data:`CANONICAL_KINDS`, :data:`KIND_ALIASES` and
+:func:`normalize_kind` in this module are thin re-exports/wrappers over it, not
+a second copy. Abhi's values ("sanctuary", "restricted", "anchorage", ...) are
+a different vocabulary for the same concepts; see
+:func:`tracker.contracts.normalize_kind` for the unknown-input policy (it
+raises -- it never guesses).
 
-**buffer_m is absent from Abhi's dataclass, so adapters default it to 0.0.**
-That is correct for a polygon and *wrong for a cable corridor*: a zero-buffered
-route has no area and can never contain anything, so a cable layer imported
-through Abhi's shape would silently never fire. Whoever loads a cable layer must
-pass ``buffer_m`` / ``default_buffer_m`` explicitly. For line geometries this
-module refuses to guess and raises instead (see :func:`load_geojson_fences`).
+**buffer_m is absent from Abhi's dataclass, so** :func:`geofence_from_mapping`
+**defaults it to** :func:`tracker.contracts.default_buffer_m` **for the
+resolved kind** (500 m for cable, 0.0 otherwise) rather than a hardcoded 0.0.
+A hardcoded zero is *wrong for a cable corridor*: a zero-buffered route has no
+area and can never contain anything, so a cable layer imported through Abhi's
+shape with no buffer field would silently never fire. Pass ``buffer_m=``
+explicitly to override the default in either direction. A raw, already-built
+shapely LineString handed to :func:`geofence_from_mapping` is the one case
+where the default is deliberately NOT applied -- an explicit buffer is
+required there too, and :func:`load_geojson_fences` likewise refuses to guess
+a buffer for a line geometry (see both functions' docstrings).
 
 Omar's scenario packs (``origin/omar/scenario-packs``) are a *fourth* shape, and
 not a Geofence at all. ``pack.json`` keys the layer list as ``geofence_layers``
@@ -98,13 +106,15 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import shapely
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Polygon
 from shapely.geometry.base import BaseGeometry
+
+from tracker import contracts
 
 __all__ = [
     "Geofence",
@@ -117,6 +127,7 @@ __all__ = [
     "geofence_from_ring",
     "geofence_from_mapping",
     "load_geojson_fences",
+    "build_index",
     "CANONICAL_KINDS",
     "KIND_ALIASES",
     "EARTH_RADIUS_M",
@@ -140,7 +151,7 @@ class Geofence:
     """
 
     id: str
-    kind: str  # "mpa" | "cable" | "port" | "danger"
+    kind: str  # "mpa" | "cable" | "port" | "danger" | "land"
     label: str
     geom: object  # shapely Polygon/MultiPolygon, ENU metres, already buffered
     buffer_m: float = 0.0
@@ -282,61 +293,30 @@ def lonlat_to_enu(
 # ==========================================================================
 
 
-class GeofenceContractError(ValueError):
+class GeofenceContractError(contracts.ContractError):
     """A foreign fence shape could not be adapted, and guessing would be worse.
 
-    A ``ValueError`` subclass so existing ``except ValueError`` handlers still
-    catch it, but nameable on its own for callers that want to report "your fence
-    file is wrong" distinctly from arithmetic failures.
+    Subclasses :class:`tracker.contracts.ContractError` (itself a ``ValueError``
+    subclass), so a bare ``except contracts.ContractError`` catches both this
+    module's failures and contracts.py's own, and existing ``except
+    GeofenceContractError`` / ``except ValueError`` callers keep working
+    unchanged -- this is still a ``ValueError`` through the chain.
     """
 
 
 #: The only kind values that may reach :class:`Geofence`. Downstream severity
-#: rules (Jac) switch on these four strings; anything else is a merge bug.
-CANONICAL_KINDS: tuple[str, ...] = ("mpa", "cable", "port", "danger")
+#: rules (Jac) switch on these strings; anything else is a merge bug.
+#:
+#: Sourced from :mod:`tracker.contracts` -- the single vocabulary shared across
+#: the tracker, the scenario loader and the Jac layer. Do NOT reintroduce a
+#: private copy here: that is exactly the drift this module used to have (a
+#: 4-kind table missing "land", the coastline/grounding-hazard kind).
+CANONICAL_KINDS: tuple[str, ...] = contracts.CANONICAL_KINDS
 
-#: Foreign vocabulary -> canonical kind. Keys are already normalized (lowercase,
-#: underscore-separated); :func:`normalize_kind` normalizes its input the same
-#: way, so "Marine Sanctuary", "marine-sanctuary" and "MARINE_SANCTUARY" all hit
-#: the same entry. Includes Abhi's vocabulary and the GeoJSON property values
-#: that show up in NOAA / Natural Earth / NGA layers.
-KIND_ALIASES: dict[str, str] = {
-    # -> mpa
-    "mpa": "mpa",
-    "sanctuary": "mpa",
-    "marine_sanctuary": "mpa",
-    "national_marine_sanctuary": "mpa",
-    "nms": "mpa",
-    "protected": "mpa",
-    "protected_area": "mpa",
-    "marine_protected_area": "mpa",
-    "reserve": "mpa",
-    "preserve": "mpa",
-    # -> danger
-    "danger": "danger",
-    "danger_zone": "danger",
-    "restricted": "danger",
-    "restricted_area": "danger",
-    "military": "danger",
-    "military_area": "danger",
-    "exclusion": "danger",
-    "exclusion_zone": "danger",
-    "hazard": "danger",
-    # -> port
-    "port": "port",
-    "anchorage": "port",
-    "harbor": "port",
-    "harbour": "port",
-    "terminal": "port",
-    "berth": "port",
-    # -> cable
-    "cable": "cable",
-    "cable_corridor": "cable",
-    "corridor": "cable",
-    "submarine_cable": "cable",
-    "subsea_cable": "cable",
-    "pipeline": "cable",
-}
+#: Foreign vocabulary -> canonical kind, straight from contracts.py. See
+#: :func:`tracker.contracts.normalize_kind` for the unknown-input policy (it
+#: raises -- it never guesses).
+KIND_ALIASES: dict[str, str] = contracts.KIND_ALIASES
 
 # Sentinel distinguishing "caller passed default=None" from "caller passed no
 # default at all". None is a legitimate thing to want back.
@@ -349,10 +329,17 @@ _KIND_PROPERTY_KEYS = ("kind", "type", "category", "class", "fence_type", "layer
 _LABEL_PROPERTY_KEYS = ("label", "name", "title", "sanctuary")
 _ID_PROPERTY_KEYS = ("id", "fence_id", "geofence_id", "poly_id")
 
-_ID_FIELDS = ("id", "fence_id", "geofence_id")
-_LABEL_FIELDS = ("label", "name", "title")
-_KIND_FIELDS = ("kind", "type", "category")
-_GEOM_FIELDS = ("geom", "polygon", "ring", "coordinates")
+# id / label / kind / buffer_m are resolved via contracts.resolve_field and
+# contracts.FIELD_ALIASES (see geofence_from_mapping) rather than a private
+# copy of those tables -- that private-copy drift is exactly what let a
+# mapping spelled {"buffer": 500} silently resolve to buffer_m=0.0 before.
+#
+# Geometry stays geofence-specific: contracts' "geometry" alias list is
+# generic (it does not know this module's shapely handling), so the local
+# table below is authoritative for geometry, but it is a strict superset of
+# contracts.FIELD_ALIASES["geometry"] -- nothing contracts.py already agreed
+# to accept ("geometry", "rings") is rejected here.
+_GEOM_FIELDS = ("geom", "polygon", "ring", "coordinates", "geometry", "rings")
 
 
 def _norm_token(raw: object) -> str:
@@ -392,19 +379,17 @@ def normalize_kind(raw: str, *, default: Any = _NO_DEFAULT) -> str:
     validated, so ``default="danger"`` is available to anyone who wants the
     conservative behaviour and has decided it is right for their layer.
     """
-    token = _norm_token(raw)
-    hit = KIND_ALIASES.get(token)
-    if hit is not None:
-        return hit
-    if default is not _NO_DEFAULT:
-        return default
-    raise GeofenceContractError(
-        f"unknown geofence kind {raw!r} (normalized to {token!r}); "
-        f"canonical kinds are {CANONICAL_KINDS}. Add an entry to "
-        f"tracker.geofence.KIND_ALIASES, pass an explicit kind=, or pass "
-        f"normalize_kind(..., default=...) if a fallback is genuinely correct. "
-        f"Refusing to guess: an invented kind changes alert severity."
-    )
+    # Delegates to contracts.normalize_kind -- the single source of truth for
+    # the kind vocabulary -- and re-wraps its ContractError as
+    # GeofenceContractError so existing callers here keep catching the type
+    # they already expect. contracts.py's own CANONICAL_KINDS/KIND_ALIASES are
+    # used directly (see above), so this never drifts from them again.
+    try:
+        if default is _NO_DEFAULT:
+            return contracts.normalize_kind(raw)
+        return contracts.normalize_kind(raw, default=default)
+    except contracts.ContractError as exc:
+        raise GeofenceContractError(str(exc)) from exc
 
 
 def _resolve_field(m: object, names: Sequence[str]) -> tuple[str, Any] | None:
@@ -510,41 +495,62 @@ def geofence_from_mapping(m: object, *, buffer_m: float | None = None) -> Geofen
 
     Duck-typed: ``m`` may be a ``dict`` (the build plan's shape, or a scenario
     pack's layer entry) or any object with attributes (Abhi's frozen dataclass,
-    a namespace, an ORM row). Resolution order, first match wins:
+    a namespace, an ORM row). ``id``, ``label``, ``kind`` and ``buffer_m`` are
+    resolved via :func:`tracker.contracts.resolve_field` against
+    :data:`tracker.contracts.FIELD_ALIASES` -- the single spelling table shared
+    with the rest of the project, not a private copy of it. Resolution order,
+    first match wins:
 
     ==========  =====================================================
-    ``id``      ``id`` / ``fence_id`` / ``geofence_id``
-    ``label``   ``label`` / ``name`` / ``title``  (falls back to ``id``)
-    ``kind``    ``kind`` / ``type`` / ``category``, then :func:`normalize_kind`
-    geometry    ``geom`` / ``polygon`` / ``ring`` / ``coordinates``
-    ``buffer_m````buffer_m``, else the ``buffer_m=`` argument, else ``0.0``
+    ``id``      ``tracker.contracts.FIELD_ALIASES["id"]``
+                (``id`` / ``fence_id`` / ``geofence_id`` / ``fenceId``)
+    ``label``   ``tracker.contracts.FIELD_ALIASES["label"]``
+                (``label`` / ``name`` / ``title``, falls back to ``id``)
+    ``kind``    ``tracker.contracts.FIELD_ALIASES["kind"]``
+                (``kind`` / ``type`` / ``category``), then :func:`normalize_kind`
+    geometry    ``geom`` / ``polygon`` / ``ring`` / ``coordinates`` /
+                ``geometry`` / ``rings`` (geofence-specific: this module's
+                shapely handling is a superset of contracts' generic list)
+    ``buffer_m``  ``tracker.contracts.FIELD_ALIASES["buffer_m"]``
+                (``buffer_m`` / ``buffer`` / ``bufferMeters``), else the
+                ``buffer_m=`` argument, else
+                :func:`tracker.contracts.default_buffer_m` for ``kind``
     ==========  =====================================================
 
-    ``buffer_m`` defaults to ``0.0`` because Abhi's dataclass has no such field.
-    That is right for polygons and WRONG for cable corridors -- pass
-    ``buffer_m=`` when importing a cable layer through this adapter.
+    ``buffer_m`` falls back to :func:`tracker.contracts.default_buffer_m`
+    (500 m for ``cable``, 0.0 for everything else) rather than a hardcoded
+    ``0.0`` when no field and no argument supplies one -- Abhi's dataclass has
+    no ``buffer_m`` member, and a cable layer imported through it with a
+    hardcoded zero fallback is a zero-area corridor that can never contain
+    anything. Pass ``buffer_m=`` explicitly to override the default in either
+    direction.
 
     RE-BUFFER RULE. ``Geofence.geom`` is *already buffered* and ``buffer_m`` is
     provenance only, so this adapter must not double-buffer a round trip:
 
     * geometry arrives as an areal shapely geometry (Polygon/MultiPolygon)
       -> taken verbatim, ``buffer_m`` recorded as provenance, nothing applied;
-    * geometry arrives as raw coordinates -> polygonized, then buffered if
-      ``buffer_m > 0``;
-    * geometry arrives as a shapely line -> buffered, and ``buffer_m > 0`` is
-      REQUIRED, because a zero-buffered line has no area and can never contain
-      anything.
+    * geometry arrives as raw coordinates -> polygonized, then buffered by the
+      resolved ``buffer_m`` (field, argument, or the per-kind default) if it
+      is greater than zero;
+    * geometry arrives as a shapely line -> buffered, and an EXPLICIT
+      ``buffer_m > 0`` (from the field or the argument) is REQUIRED -- the
+      per-kind default is deliberately NOT applied here. A caller who hands
+      this adapter a raw, zero-area shapely LineString has made a specific
+      choice about geometry and must make an equally specific choice about
+      the buffer; silently buffering it by a guessed default would launder a
+      missing-field bug into a working-looking corridor of the wrong width.
 
     Raises :class:`GeofenceContractError` naming the field that was missing.
     A geometry is never guessed or synthesised.
     """
-    found_id = _resolve_field(m, _ID_FIELDS)
+    found_id = contracts.resolve_field(m, "id", default=None)
     if found_id is None:
         raise GeofenceContractError(
-            f"geofence is missing an id: none of {_ID_FIELDS} present on "
-            f"{type(m).__name__}"
+            f"geofence is missing an id: none of {contracts.FIELD_ALIASES['id']} "
+            f"present on {type(m).__name__}"
         )
-    fence_id = str(found_id[1])
+    fence_id = str(found_id)
 
     found_geom = _resolve_field(m, _GEOM_FIELDS)
     if found_geom is None:
@@ -553,23 +559,28 @@ def geofence_from_mapping(m: object, *, buffer_m: float | None = None) -> Geofen
             f"present on {type(m).__name__}. Refusing to guess a geometry."
         )
 
-    found_kind = _resolve_field(m, _KIND_FIELDS)
+    found_kind = contracts.resolve_field(m, "kind", default=None)
     if found_kind is None:
         raise GeofenceContractError(
-            f"geofence {fence_id!r} is missing a kind: none of {_KIND_FIELDS} "
-            f"present on {type(m).__name__}; expected one of {CANONICAL_KINDS} "
-            f"or a known alias"
+            f"geofence {fence_id!r} is missing a kind: none of "
+            f"{contracts.FIELD_ALIASES['kind']} present on {type(m).__name__}; "
+            f"expected one of {CANONICAL_KINDS} or a known alias"
         )
-    kind = normalize_kind(found_kind[1])
+    kind = normalize_kind(found_kind)
 
-    found_label = _resolve_field(m, _LABEL_FIELDS)
-    label = str(found_label[1]) if found_label is not None else fence_id
+    found_label = contracts.resolve_field(m, "label", default=None)
+    label = str(found_label) if found_label is not None else fence_id
 
-    if buffer_m is None:
-        found_buf = _resolve_field(m, ("buffer_m",))
-        buf = float(found_buf[1]) if found_buf is not None else 0.0
+    # `buf` is the EXPLICIT value only (field or argument), never defaulted --
+    # it is what gates the raw-shapely-line REQUIRED check below. `effective_buf`
+    # is `buf` with the per-kind default filled in, and is what actually gets
+    # applied to coordinate-built polygons and recorded as provenance.
+    if buffer_m is not None:
+        buf: float | None = float(buffer_m)
     else:
-        buf = float(buffer_m)
+        found_buf = contracts.resolve_field(m, "buffer_m", default=None)
+        buf = float(found_buf) if found_buf is not None else None
+    effective_buf = buf if buf is not None else contracts.default_buffer_m(kind)
 
     raw_geom = found_geom[1]
     # isinstance FIRST: a shapely geometry is iterable-ish enough that coercing
@@ -582,21 +593,25 @@ def geofence_from_mapping(m: object, *, buffer_m: float | None = None) -> Geofen
             )
         if raw_geom.area > 0.0:
             geom: BaseGeometry = raw_geom          # already buffered; verbatim
+            final_buf = effective_buf
         else:
-            if buf <= 0.0:
+            if buf is None or buf <= 0.0:
                 raise GeofenceContractError(
                     f"geofence {fence_id!r} has a zero-area "
-                    f"{raw_geom.geom_type} geometry and buffer_m={buf}; a "
+                    f"{raw_geom.geom_type} geometry and no explicit buffer_m; a "
                     f"zero-buffered line can never contain a point. Pass "
-                    f"buffer_m > 0 for a corridor."
+                    f"buffer_m > 0 (as a field or the buffer_m= argument) for "
+                    f"a corridor."
                 )
             geom = raw_geom.buffer(buf)
+            final_buf = buf
     else:
         geom = _geom_from_coords(raw_geom)
-        if buf > 0.0:
-            geom = geom.buffer(buf)
+        if effective_buf > 0.0:
+            geom = geom.buffer(effective_buf)
+        final_buf = effective_buf
 
-    return Geofence(id=fence_id, kind=kind, label=label, geom=geom, buffer_m=buf)
+    return Geofence(id=fence_id, kind=kind, label=label, geom=geom, buffer_m=final_buf)
 
 
 # --------------------------------------------------------------------------
@@ -669,6 +684,7 @@ def load_geojson_fences(
     default_buffer_m: float = 0.0,
     kind: str | None = None,
     label: str | None = None,
+    layer: str | None = None,
 ) -> list[Geofence]:
     """Load a WGS84 lon/lat GeoJSON file into ENU-metre :class:`Geofence` objects.
 
@@ -701,6 +717,17 @@ def load_geojson_fences(
     filename stem. Ids come from ``id`` / ``fence_id`` / ``geofence_id`` /
     ``poly_id`` properties, else ``<stem>-<index>``; duplicates get a ``#n``
     suffix so :class:`GeofenceIndex` lookups stay unambiguous.
+
+    ``layer`` NAMESPACING (optional, additive). Two independently loaded files
+    can each produce id ``"1"`` (Monterey's fence resolves to ``"1"`` from its
+    ``POLY_ID`` property, and so can any other layer that numbers its polygons
+    from one); combined into one :class:`GeofenceIndex`, that collision is a
+    silent last-wins fence swap. Passing ``layer=`` runs every id produced from
+    this file through :func:`tracker.contracts.namespaced_id` (e.g.
+    ``"monterey:1"``), after the ``#n`` de-duplication above. The default,
+    ``layer=None``, preserves the exact old behaviour -- bare, unprefixed ids --
+    so existing callers are unaffected. See also :func:`build_index`, which
+    namespaces and combines fences from several layers in one call.
     """
     path_s = os.fspath(path)
     stem = os.path.splitext(os.path.basename(path_s))[0]
@@ -788,8 +815,53 @@ def load_geojson_fences(
         else:
             seen[fid] = 0
 
+        if layer is not None:
+            try:
+                fid = contracts.namespaced_id(layer, fid)
+            except contracts.ContractError as exc:
+                raise GeofenceContractError(str(exc)) from exc
+
         out.append(
             Geofence(id=fid, kind=fkind, label=flabel, geom=geom, buffer_m=buf)
         )
 
     return out
+
+
+def build_index(fences_by_layer: Mapping[str, Sequence[Geofence]]) -> GeofenceIndex:
+    """Combine fences from several named layers into one collision-safe index.
+
+    The real fix for "two layers both produce fence id '1'": every fence's id
+    is run through :func:`tracker.contracts.namespaced_id` for the layer it
+    came from, UNLESS it is already namespaced (its id already contains
+    ``":"`` -- e.g. it came from :func:`load_geojson_fences` called with
+    ``layer=`` already), in which case it is taken verbatim rather than
+    double-namespaced. Uniqueness is then asserted across the *combined* id
+    set via :func:`tracker.contracts.assert_unique_ids` before the
+    :class:`GeofenceIndex` is built, so two fences that still collide --
+    typically because they arrived pre-namespaced with the same layer:id pair
+    -- raise :class:`GeofenceContractError` instead of one silently replacing
+    the other in a last-wins id map.
+
+    ``fences_by_layer`` is ``{layer_name: [Geofence, ...]}``. Layer names are
+    only used for namespacing ids that need it; the fences themselves are not
+    otherwise modified (kind/label/geom/buffer_m are preserved verbatim).
+    """
+    namespaced: list[Geofence] = []
+    for layer_name, fences in fences_by_layer.items():
+        for f in fences:
+            if ":" in f.id:
+                namespaced.append(f)
+            else:
+                try:
+                    new_id = contracts.namespaced_id(layer_name, f.id)
+                except contracts.ContractError as exc:
+                    raise GeofenceContractError(str(exc)) from exc
+                namespaced.append(replace(f, id=new_id))
+
+    try:
+        contracts.assert_unique_ids(f.id for f in namespaced)
+    except contracts.ContractError as exc:
+        raise GeofenceContractError(str(exc)) from exc
+
+    return GeofenceIndex(namespaced)

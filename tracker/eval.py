@@ -71,10 +71,33 @@ Conventions this module assumes about pack data
   actor's ``start_latlon``. The time-varying separation is not derivable from
   pack JSON -- track generators like ``gen:transit`` are interpreted by the
   unmerged replay layer -- so the detail line says "initial separation" rather
-  than claiming more than was measured.
+  than claiming more than was measured. The margin against the stated threshold
+  is printed in metres and percent, and a margin under
+  :data:`MARGIN_WARN_FRAC` of the threshold is flagged ``MARGIN`` (still a PASS)
+  because such a result is decided by the earth model, not by the scenario. Two
+  companion rows carry the rest of that story: the same separation under a
+  sphere and under a WGS-84 latitude-corrected model, and a note that the
+  minimum over the replay is not derivable here at all.
 * ``predicted_vs_true_offset_verified_m`` is a figure the pack author verified
   with a script, not a hard engine guarantee, so it is checked against a
   documented +/-20% tolerance (``OFFSET_TOLERANCE_FRAC``).
+
+Pack-level checks
+-----------------
+Some authoring bugs are not keys in ``expected`` -- a pack can point at a file
+that is not there. Those are reported in the same PASS/FAIL/SKIP rows, appended
+after the ``expected`` rows, and they are emitted only when the pack actually
+carries the data they inspect (no ``bbox``, no ``bbox`` row). Keeping them
+silent on packs that say nothing about the subject is what stops the report
+growing a column of vacuous rows.
+
+Both contract spellings are accepted
+------------------------------------
+``bbox`` may be the array ``[lon_min, lat_min, lon_max, lat_max]`` from the
+build plan or the object ``{"lon_min": ..., ...}`` the packs actually use;
+a time window may be ``{"start": <ISO-8601>, "end": <ISO-8601>}`` or carry
+epoch ``start_t``/``end_t``. A naive ISO timestamp is read as UTC -- see
+:func:`_parse_epoch`.
 
 Deviation from the build plan
 -----------------------------
@@ -93,9 +116,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
 
@@ -107,8 +131,12 @@ __all__ = [
     "CheckResult",
     "PackResult",
     "CHECKERS",
+    "PACK_CHECKS",
     "OFFSET_TOLERANCE_FRAC",
     "EARTH_RADIUS_KM",
+    "MARGIN_WARN_FRAC",
+    "WGS84_A_KM",
+    "WGS84_F",
     "discover_packs",
     "load_pack",
     "evaluate_pack",
@@ -145,20 +173,43 @@ OFFSET_TOLERANCE_FRAC: float = 0.20
 #: Mean-Earth-radius sphere, IUGG. Fixed by choice, not fitted to pack data.
 EARTH_RADIUS_KM: float = 6371.0088
 
+#: WGS-84 ellipsoid, used only as a SECOND opinion on a distance -- never to
+#: decide an outcome. See :func:`_ellipsoidal_km`.
+WGS84_A_KM: float = 6378.137
+WGS84_F: float = 1.0 / 298.257223563
+
+#: A threshold check whose margin is smaller than this fraction of the stated
+#: value is not really being decided by the scenario -- it is being decided by
+#: whichever earth model the harness happens to use. Such a row still PASSes
+#: (manufacturing a red row on stage would be worse) but is flagged ``MARGIN``
+#: and counted separately in the summary. ``marginal`` never affects the exit
+#: code: nothing has actually failed.
+MARGIN_WARN_FRAC: float = 0.01
+
 #: Longest detail sentence rendered before elision, so one verbose ``expected``
-#: value cannot wreck the column alignment of the whole report.
-MAX_DETAIL_CHARS: int = 96
+#: value cannot wreck the column alignment of the whole report. Raised from 96
+#: to fit a margin sentence whole (value, requirement, margin in m and %, and
+#: the earth model that produced it) instead of cutting off the part a reviewer
+#: needs; 132 is the widest horizontal rule the report will draw.
+MAX_DETAIL_CHARS: int = 132
 
 
 @dataclass(frozen=True)
 class CheckResult:
-    """The outcome of one expected-block key."""
+    """The outcome of one expected-block key.
+
+    ``marginal`` is deliberately the LAST field so that any existing positional
+    construction of a CheckResult keeps working. It is an annotation on a PASS,
+    not a fourth outcome: a marginal check held, but only just, and by a margin
+    thin enough that the earth model decided it.
+    """
 
     key: str
     outcome: str
     detail: str
     expected: object = None
     actual: object = None
+    marginal: bool = False
 
 
 @dataclass(frozen=True)
@@ -183,6 +234,11 @@ class PackResult:
         return sum(1 for c in self.checks if c.outcome == SKIP)
 
     @property
+    def marginal(self) -> int:
+        """Checks that held by a margin thin enough to be model-dependent."""
+        return sum(1 for c in self.checks if c.marginal)
+
+    @property
     def ok(self) -> bool:
         """True when nothing FAILED. SKIPs are allowed."""
         return self.failed == 0
@@ -193,8 +249,17 @@ class PackResult:
 # --------------------------------------------------------------------------- #
 
 
-def _passed(key: str, detail: str, expected: object = None, actual: object = None) -> CheckResult:
-    return CheckResult(key=key, outcome=PASS, detail=detail, expected=expected, actual=actual)
+def _passed(
+    key: str,
+    detail: str,
+    expected: object = None,
+    actual: object = None,
+    *,
+    marginal: bool = False,
+) -> CheckResult:
+    return CheckResult(
+        key=key, outcome=PASS, detail=detail, expected=expected, actual=actual, marginal=marginal
+    )
 
 
 def _failed(key: str, detail: str, expected: object = None, actual: object = None) -> CheckResult:
@@ -287,22 +352,202 @@ def _fence_names(pack: dict) -> list[str]:
     return names
 
 
+# --------------------------------------------------------------------------- #
+# time and bbox: both contract spellings
+# --------------------------------------------------------------------------- #
+
+#: Key pairs that name the two ends of a time window. The build plan writes
+#: epoch ``start_t``/``end_t``; Omar's packs write ISO-8601 ``start``/``end``.
+#: Both are read, in this order, wherever a window can live.
+_WINDOW_KEY_PAIRS: tuple[tuple[str, str], ...] = (
+    ("start_t", "end_t"),
+    ("start", "end"),
+    ("t_start", "t_end"),
+)
+
+#: Containers searched for a window, in order: the canonical ``time_window``,
+#: then an AIS-side window under either spelling, then the pack root (which is
+#: where bare ``start_t``/``end_t`` would sit).
+_WINDOW_CONTAINERS: tuple[str | None, ...] = ("time_window", "ais_window", "ais", None)
+
+
+def _parse_epoch(value: Any) -> tuple[float | None, str | None]:
+    """``(epoch_seconds, error)`` for one end of a time window.
+
+    Accepts a number (already epoch seconds) or an ISO-8601 string. Python
+    3.12's ``fromisoformat`` handles a trailing ``Z`` natively, so no string
+    surgery is needed.
+
+    A NAIVE ISO timestamp (no offset) is interpreted as UTC, not as the
+    machine's local zone. ``datetime.timestamp()`` on a naive datetime silently
+    applies the local zone, which would shift every scenario time by however
+    many hours the demo laptop happens to be from Greenwich; the scenario packs
+    are written in UTC and must not depend on where the laptop is.
+
+    Never raises: an uninterpretable value comes back as an error string so the
+    caller can turn it into a FAIL row.
+    """
+    if isinstance(value, bool):  # bool is an int subclass; not a timestamp
+        return None, f"{value!r} is not a time"
+    if isinstance(value, (int, float)):
+        if math.isfinite(float(value)):
+            return float(value), None
+        return None, f"{value!r} is not a finite time"
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None, f"{value!r} is not an ISO-8601 timestamp"
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)  # naive means UTC here
+        return dt.timestamp(), None
+    return None, f"{value!r} is not a time"
+
+
+def _window_bounds(pack: dict) -> tuple[tuple[float, float] | None, str | None]:
+    """``(bounds, error)`` for the pack's time window.
+
+    ``bounds`` is ``(start_epoch, end_epoch)``. Three outcomes:
+
+    * ``(bounds, None)``  -- a window was found and both ends parsed.
+    * ``(None, error)``   -- a window was found, at least one end parsed, and
+      the other did not. A half-interpretable window is a genuine authoring
+      bug, so the caller FAILs on it.
+    * ``(None, None)``    -- nothing recognisable as a window, or a window in
+      which NOTHING parsed. The caller then omits the in-window check instead
+      of failing it. That leniency is deliberate and load-bearing: see
+      ``test_unparseable_time_window_does_not_fail_the_timing_check``. A pack
+      that speaks no time dialect this harness knows is a pack whose timings
+      simply cannot be range-checked; only a pack that half-speaks one is
+      making a claim it gets wrong.
+    """
+    for container_key in _WINDOW_CONTAINERS:
+        container = pack if container_key is None else pack.get(container_key)
+        if not isinstance(container, dict):
+            continue
+        for start_key, end_key in _WINDOW_KEY_PAIRS:
+            if start_key not in container or end_key not in container:
+                continue
+            t0, err0 = _parse_epoch(container[start_key])
+            t1, err1 = _parse_epoch(container[end_key])
+            if t0 is not None and t1 is not None:
+                return (t0, t1), None
+            if t0 is not None or t1 is not None:
+                where = container_key or "pack root"
+                bad_key, bad_err = (end_key, err1) if t0 is not None else (start_key, err0)
+                return None, f"{where}.{bad_key}: {bad_err}"
+    return None, None
+
+
 def _window_duration_s(pack: dict) -> float | None:
-    """Length of ``time_window`` in seconds, or None if not parseable."""
-    window = pack.get("time_window")
-    if not isinstance(window, dict):
+    """Length of the pack's time window in seconds, or None if not parseable."""
+    bounds, _ = _window_bounds(pack)
+    if bounds is None:
         return None
-    start, end = window.get("start"), window.get("end")
-    if isinstance(start, (int, float)) and isinstance(end, (int, float)):
-        return float(end) - float(start)
-    if not isinstance(start, str) or not isinstance(end, str):
-        return None
-    try:
-        t0 = datetime.fromisoformat(start)
-        t1 = datetime.fromisoformat(end)
-    except ValueError:
-        return None
-    return (t1 - t0).total_seconds()
+    return bounds[1] - bounds[0]
+
+
+def _bbox_bounds(pack: dict) -> tuple[tuple[float, float, float, float] | None, str | None]:
+    """``(bounds, error)`` for ``bbox`` as ``(lon_min, lat_min, lon_max, lat_max)``.
+
+    Both spellings are accepted: the build plan's array
+    ``[lon_min, lat_min, lon_max, lat_max]`` and the object the packs actually
+    carry, ``{"lon_min": .., "lat_min": .., "lon_max": .., "lat_max": ..}``.
+    Returns ``(None, None)`` when the pack declares no bbox at all.
+    """
+    bbox = pack.get("bbox")
+    if bbox is None:
+        return None, None
+    if isinstance(bbox, dict):
+        try:
+            return (
+                float(bbox["lon_min"]),
+                float(bbox["lat_min"]),
+                float(bbox["lon_max"]),
+                float(bbox["lat_max"]),
+            ), None
+        except (KeyError, TypeError, ValueError) as exc:
+            return None, f"bbox object is missing or has a non-numeric corner ({exc})"
+    if isinstance(bbox, (list, tuple)):
+        if len(bbox) != 4:
+            return None, f"bbox array has {len(bbox)} entries, expected 4 [lon_min, lat_min, lon_max, lat_max]"
+        try:
+            lon_min, lat_min, lon_max, lat_max = (float(v) for v in bbox)
+        except (TypeError, ValueError):
+            return None, "bbox array has a non-numeric entry"
+        return (lon_min, lat_min, lon_max, lat_max), None
+    return None, f"bbox is {type(bbox).__name__}, expected an array of 4 or an object"
+
+
+# --------------------------------------------------------------------------- #
+# file references
+# --------------------------------------------------------------------------- #
+
+#: Keys whose STRING value is taken to be a file reference. Deliberately
+#: generous -- a false positive costs one row that says a path is missing, a
+#: false negative costs a demo where a lookup silently reads nothing.
+_FILE_REF_KEYS: frozenset[str] = frozenset(
+    {"file", "path", "csv", "geojson", "filename", "source", "ais_window"}
+)
+
+#: Something with an extension, e.g. ``.csv`` or ``.geojson``.
+_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+
+
+def _is_ref_key(key: str) -> bool:
+    if key.startswith("_"):  # private harness keys, e.g. _source_path
+        return False
+    k = key.lower()
+    return k in _FILE_REF_KEYS or "file" in k or k.endswith(("_path", "_csv", "_geojson"))
+
+
+def _collect_file_refs(node: Any, out: list[tuple[str, str]], trail: str = "") -> None:
+    """Walk the pack collecting ``(json_path, reference)`` for every file ref.
+
+    Recurses dicts and lists, so ``geofence_layers[0].file``, ``ais.file`` and
+    anything else buried under a ``file``/``path``/``csv``/``geojson`` key is
+    found wherever the author put it.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            where = f"{trail}.{key}" if trail else str(key)
+            if isinstance(value, str) and _is_ref_key(str(key)):
+                ref = value.strip()
+                if not ref or "://" in ref:
+                    continue  # a URL is not a path on this disk
+                if str(key).lower() not in ("file", "path", "csv", "geojson", "filename"):
+                    if not _EXT_RE.search(ref):
+                        continue  # a loose key must look like a filename to count
+                out.append((where, ref))
+                continue
+            _collect_file_refs(value, out, where)
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            _collect_file_refs(value, out, f"{trail}[{i}]")
+
+
+def _notes_path_candidates(pack: dict) -> list[str]:
+    """Path-looking tokens inside free-text ``notes``.
+
+    A token counts only if it has BOTH a ``/`` and a trailing extension. The
+    slash alone is not enough: s03's notes say "crude/oil tanker", which is
+    prose, while "geo/ofac_sdn_vessels_subset.csv" is a claim about the disk.
+    """
+    texts: list[str] = []
+    for source in (pack.get("notes"), (pack.get("expected") or {}).get("notes")):
+        if isinstance(source, str):
+            texts.append(source)
+    found: list[str] = []
+    for text in texts:
+        for raw in text.split():
+            token = raw.strip("(),;:'\"[]{}<>")
+            if "/" not in token or "://" in token:
+                continue
+            if not _EXT_RE.search(token):
+                continue
+            if token not in found:
+                found.append(token)
+    return found
 
 
 def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -317,6 +562,29 @@ def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
     dlat, dlon = lat2 - lat1, lon2 - lon1
     h = math.sin(dlat / 2.0) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2.0) ** 2
     return 2.0 * EARTH_RADIUS_KM * math.asin(math.sqrt(min(1.0, h)))
+
+
+def _ellipsoidal_km(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Second-opinion distance in km on the WGS-84 ellipsoid.
+
+    Equirectangular projection using the LOCAL radii of curvature at the
+    midpoint latitude -- meridional ``M`` for the north-south leg, prime
+    vertical ``N`` scaled by ``cos(phi)`` for the east-west leg -- rather than a
+    single mean sphere radius. Over tens of kilometres this agrees with a full
+    geodesic to a few metres, and it needs nothing but ``math``.
+
+    This never decides an outcome. It exists so a check whose margin is thinner
+    than the disagreement between earth models can SAY SO on the report instead
+    of quietly depending on the constant at the top of this file.
+    """
+    e2 = WGS84_F * (2.0 - WGS84_F)
+    phi = math.radians((a[0] + b[0]) / 2.0)
+    s2 = math.sin(phi) ** 2
+    meridional = WGS84_A_KM * (1.0 - e2) / (1.0 - e2 * s2) ** 1.5
+    prime_vertical = WGS84_A_KM / math.sqrt(1.0 - e2 * s2)
+    y = meridional * math.radians(b[0] - a[0])
+    x = prime_vertical * math.cos(phi) * math.radians(b[1] - a[1])
+    return math.hypot(x, y)
 
 
 def _run_value(results: dict | None, key: str, check_key: str) -> tuple[bool, Any, CheckResult | None]:
@@ -437,8 +705,13 @@ def _check_timing(
     problems: list[str] = []
     facts: list[str] = []
 
-    duration = _window_duration_s(pack)
-    if duration is None:
+    bounds, window_error = _window_bounds(pack)
+    duration = None if bounds is None else bounds[1] - bounds[0]
+    if window_error is not None:
+        # Half-interpretable window: one end read fine, the other is garbage.
+        # That is an authoring bug in the pack, so it is a FAIL, not an omission.
+        problems.append(f"time window is unparseable -- {window_error}")
+    elif duration is None:
         facts.append("time_window not parseable, in-window check omitted")
     elif 0.0 <= t <= duration:
         facts.append(f"t={t:g}s in window (0-{duration:g}s)")
@@ -493,12 +766,50 @@ def check_radar_contact_at_s(expected: Any, pack: dict, results: dict | None) ->
     return _check_timing("radar_contact_at_s", expected, pack, must_follow=("dark_at_s",))
 
 
-def check_min_separation_km(expected: Any, pack: dict, results: dict | None) -> CheckResult:
-    """Separation at t=0 between the pack's two actors must meet the minimum.
+def _positioned_actors(pack: dict) -> list[tuple[str, tuple[float, float]]]:
+    """``(actor_id, (lat, lon))`` for every actor with a derivable start."""
+    out: list[tuple[str, tuple[float, float]]] = []
+    for aid in _actor_ids(pack):
+        actor = _actor(pack, aid)
+        if actor is None:
+            continue
+        pos = _actor_start_latlon(actor)
+        if pos is not None:
+            out.append((aid, pos))
+    return out
 
-    SKIPs when the pack does not define exactly two actors with derivable start
-    positions -- the time-varying separation depends on track generators this
-    module deliberately does not interpret.
+
+def _closest_initial_pair(
+    positioned: Sequence[tuple[str, tuple[float, float]]],
+    metric: Callable[[tuple[float, float], tuple[float, float]], float],
+) -> tuple[float, str]:
+    """``(distance_km, label)`` for the closest pair under ``metric``."""
+    if len(positioned) == 2:
+        return metric(positioned[0][1], positioned[1][1]), f"initial {positioned[0][0]}<->{positioned[1][0]}"
+    best = min(
+        (
+            (metric(positioned[i][1], positioned[j][1]), i, j)
+            for i in range(len(positioned))
+            for j in range(i + 1, len(positioned))
+        ),
+    )
+    return best[0], f"closest initial pair of {len(positioned)} actors"
+
+
+def check_min_separation_km(expected: Any, pack: dict, results: dict | None) -> CheckResult:
+    """INITIAL (t=0) separation between the pack's actors must meet the minimum.
+
+    Measured from each actor's ``start_latlon``, so it is the separation at
+    t=0 and the detail says "initial" rather than implying a minimum over the
+    replay -- which is not derivable from pack JSON at all, since the actors'
+    ``gen:`` tracks are interpreted by the replay layer this module does not
+    import. Two companion rows (see :func:`packcheck_separation_earth_model` and
+    :func:`packcheck_separation_over_replay`) carry that caveat and the
+    second-model comparison.
+
+    A margin thinner than :data:`MARGIN_WARN_FRAC` of the required value still
+    PASSes but is flagged ``MARGIN``: at that width the outcome is decided by
+    the earth model, not by the scenario.
     """
     key = "min_separation_km"
     try:
@@ -506,37 +817,45 @@ def check_min_separation_km(expected: Any, pack: dict, results: dict | None) -> 
     except (TypeError, ValueError):
         return _failed(key, f"value {expected!r} is not a number of km", expected, expected)
 
-    positioned: list[tuple[str, tuple[float, float]]] = []
-    for aid in _actor_ids(pack):
-        actor = _actor(pack, aid)
-        if actor is None:
-            continue
-        pos = _actor_start_latlon(actor)
-        if pos is not None:
-            positioned.append((aid, pos))
-
+    positioned = _positioned_actors(pack)
     if len(positioned) < 2:
         return _skipped(
             key,
             f"needs two actors with a start position; {len(positioned)} derivable from pack JSON",
             expected,
         )
-    if len(positioned) > 2:
-        pairs = [
-            _haversine_km(positioned[i][1], positioned[j][1])
-            for i in range(len(positioned))
-            for j in range(i + 1, len(positioned))
-        ]
-        actual = min(pairs)
-        label = f"closest initial pair of {len(positioned)} actors"
-    else:
-        actual = _haversine_km(positioned[0][1], positioned[1][1])
-        label = f"initial {positioned[0][0]}<->{positioned[1][0]}"
 
-    shared = f"{label} = {actual:.3f} km vs {want:.3f} km required (haversine, R={EARTH_RADIUS_KM:g} km)"
-    if actual >= want:
-        return _passed(key, shared, expected, round(actual, 3))
-    return _failed(key, shared + " -- SHORT", expected, round(actual, 3))
+    actual, label = _closest_initial_pair(positioned, _haversine_km)
+    margin_km = actual - want
+    margin_m = margin_km * 1000.0
+    margin_pct = (margin_km / abs(want) * 100.0) if want else float("inf")
+    head = f"{label} {actual:.3f} km vs {want:.3f} km required"
+    model = f"haversine R={EARTH_RADIUS_KM:.4f} km"
+
+    if actual < want:
+        return _failed(
+            key,
+            f"{head}; short by {abs(margin_m):.0f} m ({abs(margin_pct):.2f}%) -- SHORT [{model}]",
+            expected,
+            round(actual, 3),
+        )
+
+    thin = abs(want) * MARGIN_WARN_FRAC
+    if margin_km < thin:
+        return _passed(
+            key,
+            f"{head}; MARGIN {margin_m:.0f} m ({margin_pct:.2f}%), "
+            f"earth-model dependent [{model}]",
+            expected,
+            round(actual, 3),
+            marginal=True,
+        )
+    return _passed(
+        key,
+        f"{head}; margin {margin_m:.0f} m ({margin_pct:.2f}%) [{model}]",
+        expected,
+        round(actual, 3),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -682,6 +1001,197 @@ _SEVERITY = "no alert-severity model, so escalation on relink cannot be observed
 
 
 # --------------------------------------------------------------------------- #
+# PACK-LEVEL checks -- not keys in `expected`, but reported in the same rows
+# --------------------------------------------------------------------------- #
+#
+# Each returns a CheckResult, or None to emit NO ROW AT ALL. None is for "this
+# pack says nothing about the subject": a pack with no bbox should not carry a
+# bbox row. That keeps the report free of vacuous rows and keeps every one of
+# these checks silent on packs that predate it.
+
+
+def _pack_dir(pack: dict) -> Path | None:
+    """Directory the pack was loaded from, or None for a hand-built dict."""
+    source = pack.get(SOURCE_PATH_KEY)
+    if not source:
+        return None
+    return Path(str(source)).parent
+
+
+def packcheck_referenced_files(pack: dict) -> CheckResult | None:
+    """Every file path the pack references must exist next to the pack.
+
+    Resolution is relative to the pack.json's PARENT DIRECTORY, which is what
+    every consumer of these paths does. A pack that names
+    ``layers/monterey_bay_nms.geojson`` and ships it one directory over is a
+    pack whose geofence silently loads nothing.
+    """
+    key = "referenced_files"
+    refs: list[tuple[str, str]] = []
+    _collect_file_refs(pack, refs)
+    if not refs:
+        return None
+
+    base = _pack_dir(pack)
+    if base is None:
+        return _skipped(
+            key,
+            f"{len(refs)} file reference(s) found but the pack has no source path, "
+            "so nothing can be resolved (loaded from a dict, not from disk)",
+        )
+
+    missing = [(where, ref) for where, ref in refs if not (base / ref).exists()]
+    if not missing:
+        listed = ", ".join(ref for _, ref in refs)
+        return _passed(key, f"all {len(refs)} referenced file(s) exist: {listed}", None, len(refs))
+
+    # Missing path first, then the directory it was resolved against: both are
+    # load-bearing (the spec for this check names them explicitly), so the
+    # ratio -- the least useful part -- goes last where elision can eat it.
+    lead = "; ".join(f"MISSING {ref}" for _, ref in missing)
+    keys = ", ".join(where for where, _ in missing)
+    return _failed(
+        key,
+        f"{lead} -- resolved against {_short_path(str(base))} "
+        f"[{keys}; {len(refs) - len(missing)}/{len(refs)} refs exist]",
+        None,
+        [ref for _, ref in missing],
+    )
+
+
+def packcheck_free_text_paths(pack: dict) -> CheckResult | None:
+    """Path-looking tokens in free-text ``notes`` that are not on disk.
+
+    ``notes`` is prose written by the pack author, so a path mentioned only
+    there is NOT a contract and must never turn a pack red -- a sentence can
+    legitimately talk about a file that lives elsewhere in the repo, or about
+    one that has not been written yet. But a stale path in notes is exactly how
+    the next person wires a lookup to the wrong place, so silence is wrong too.
+    Hence the third outcome: a low-key SKIP row saying the reference may be
+    stale. It is visible on the projector and it costs nothing if it is a false
+    positive. A row appears only when something looks stale.
+    """
+    key = "free_text_paths"
+    candidates = _notes_path_candidates(pack)
+    if not candidates:
+        return None
+    base = _pack_dir(pack)
+    if base is None:
+        return _skipped(
+            key,
+            f"{len(candidates)} path-like token(s) in free text, unresolvable: "
+            f"the pack has no source path ({', '.join(candidates)})",
+        )
+    stale = [c for c in candidates if not (base / c).exists()]
+    if not stale:
+        return None  # every mentioned path is really there; no noisy row
+    # Kept short so the path and the verdict both survive detail elision on the
+    # projector. The word "notes" is deliberately not used: the report's own
+    # contract is that `notes` never appears as a row, and a row that printed
+    # the word would muddy that.
+    return _skipped(
+        key,
+        f"may be stale: {', '.join(stale)} is named in free text but is not under "
+        f"{_short_path(str(base))}",
+    )
+
+
+def packcheck_bbox(pack: dict) -> CheckResult | None:
+    """``bbox`` must be well formed, in either contract spelling.
+
+    Accepts the array ``[lon_min, lat_min, lon_max, lat_max]`` and the object
+    form. Only the box's own consistency is checked -- deliberately NOT whether
+    actors start inside it, because some packs give actor starts in local metres
+    rather than lat/lon and that check would cry wolf on them.
+    """
+    key = "bbox"
+    if "bbox" not in pack:
+        return None
+    bounds, error = _bbox_bounds(pack)
+    shape = "object" if isinstance(pack.get("bbox"), dict) else "array"
+    if bounds is None:
+        return _failed(key, f"{error}", None, pack.get("bbox"))
+    lon_min, lat_min, lon_max, lat_max = bounds
+    problems: list[str] = []
+    if lon_min >= lon_max:
+        problems.append(f"lon_min {lon_min:g} is not west of lon_max {lon_max:g}")
+    if lat_min >= lat_max:
+        problems.append(f"lat_min {lat_min:g} is not south of lat_max {lat_max:g}")
+    if not (-180.0 <= lon_min <= 180.0 and -180.0 <= lon_max <= 180.0):
+        problems.append("longitude outside [-180, 180]")
+    if not (-90.0 <= lat_min <= 90.0 and -90.0 <= lat_max <= 90.0):
+        problems.append("latitude outside [-90, 90]")
+    rendered = f"lon {lon_min:g}..{lon_max:g}, lat {lat_min:g}..{lat_max:g} ({shape} form)"
+    if problems:
+        return _failed(key, f"{'; '.join(problems)} -- {rendered}", None, bounds)
+    return _passed(key, f"well formed: {rendered}", None, bounds)
+
+
+def packcheck_separation_earth_model(pack: dict) -> CheckResult | None:
+    """Same initial separation under two earth models, side by side.
+
+    Emitted only when the pack states ``min_separation_km``. When the two models
+    land on opposite sides of the stated threshold, the row says STRADDLE: that
+    is the sharpest possible statement that the requirement, as written, is
+    decided by the harness's choice of earth model rather than by the scenario.
+    """
+    key = "separation_earth_model"
+    block = pack.get("expected") or {}
+    if "min_separation_km" not in block:
+        return None
+    positioned = _positioned_actors(pack)
+    if len(positioned) < 2:
+        return None
+    try:
+        want = float(block["min_separation_km"])
+    except (TypeError, ValueError):
+        return None
+
+    sphere, _ = _closest_initial_pair(positioned, _haversine_km)
+    ellipsoid, _ = _closest_initial_pair(positioned, _ellipsoidal_km)
+    both = f"sphere {sphere:.3f} km, WGS-84 {ellipsoid:.3f} km, required {want:.3f} km"
+    if (sphere >= want) != (ellipsoid >= want):
+        return _skipped(
+            key,
+            f"STRADDLE: {both} -- the models disagree, so the earth model decides this row",
+        )
+    spread_m = abs(sphere - ellipsoid) * 1000.0
+    return _skipped(key, f"models agree ({both}); they differ by {spread_m:.0f} m")
+
+
+def packcheck_separation_over_replay(pack: dict) -> CheckResult | None:
+    """Record what ``min_separation_km`` was NOT able to check.
+
+    The value checked is the separation at t=0. A minimum over the whole replay
+    is not derivable from pack JSON: the actors' ``gen:`` track strings are
+    interpreted by the replay layer, which this module deliberately does not
+    import. If the pack author meant the minimum over the replay, the stated
+    number may be wrong in a way no amount of reading the JSON can reveal --
+    two converging transits close well inside their initial separation. That is
+    a note, not a failure.
+    """
+    key = "separation_over_replay"
+    block = pack.get("expected") or {}
+    if "min_separation_km" not in block:
+        return None
+    return _skipped(
+        key,
+        "t=0 separation only; the minimum over the replay is not derivable from pack JSON "
+        "(gen: tracks live in the replay layer)",
+    )
+
+
+#: Pack-level checks, run after the ``expected`` rows, in this order.
+PACK_CHECKS: tuple[Callable[[dict], CheckResult | None], ...] = (
+    packcheck_referenced_files,
+    packcheck_free_text_paths,
+    packcheck_bbox,
+    packcheck_separation_earth_model,
+    packcheck_separation_over_replay,
+)
+
+
+# --------------------------------------------------------------------------- #
 # the registry -- adding a checker is one line
 # --------------------------------------------------------------------------- #
 
@@ -807,6 +1317,22 @@ def evaluate_pack(pack: dict, *, results: dict | None = None) -> PackResult:
             continue
         checks.append(result)
 
+    # Pack-level checks last, so an `expected` row is never displaced and
+    # checks[0] still belongs to the pack author's first key.
+    for pack_check in PACK_CHECKS:
+        try:
+            row = pack_check(pack)
+        except Exception as exc:  # same containment as the keyed checkers
+            checks.append(
+                _failed(
+                    getattr(pack_check, "__name__", "pack_check"),
+                    f"pack check raised {type(exc).__name__}: {exc}",
+                )
+            )
+            continue
+        if isinstance(row, CheckResult):
+            checks.append(row)
+
     return PackResult(
         pack_id=str(pack.get("id", "<unnamed pack>")),
         name=str(pack.get("name", "")),
@@ -910,7 +1436,7 @@ def format_report(results: Sequence[PackResult], *, use_colour: bool | None = No
     lines.append(paint("Sentinel-ISR scenario regression suite", _BOLD))
     lines.append(rule)
 
-    total_pass = total_fail = total_skip = 0
+    total_pass = total_fail = total_skip = total_marginal = 0
 
     for res in results:
         lines.append("")
@@ -928,11 +1454,13 @@ def format_report(results: Sequence[PackResult], *, use_colour: bool | None = No
         )
         lines.append(
             f"  {res.passed} passed   {res.failed} failed   {res.skipped} skipped"
+            f"   {res.marginal} marginal"
             + ("" if res.ok else paint("   <-- FAILURES IN THIS PACK", _COLOUR[FAIL]))
         )
         total_pass += res.passed
         total_fail += res.failed
         total_skip += res.skipped
+        total_marginal += res.marginal
 
     verdict = "OK" if total_fail == 0 else f"{total_fail} FAILED"
     lines.append("")
@@ -941,9 +1469,18 @@ def format_report(results: Sequence[PackResult], *, use_colour: bool | None = No
         f"TOTAL   {len(results)} pack(s)   "
         f"{paint(f'{total_pass} passed', _COLOUR[PASS])}   "
         f"{paint(f'{total_fail} failed', _COLOUR[FAIL] if total_fail else '')}   "
-        f"{paint(f'{total_skip} skipped', _COLOUR[SKIP])}   ->  "
+        f"{paint(f'{total_skip} skipped', _COLOUR[SKIP])}   "
+        f"{paint(f'{total_marginal} marginal', _COLOUR[SKIP] if total_marginal else '')}   ->  "
         f"{paint(verdict, _BOLD + (_COLOUR[PASS] if total_fail == 0 else _COLOUR[FAIL]))}"
     )
+    if total_marginal:
+        lines.append(
+            paint(
+                f"        MARGIN = passed, but by under {MARGIN_WARN_FRAC:.0%} of the stated value, "
+                "so the earth model decided it. Not a failure; does not affect the exit code.",
+                _DIM,
+            )
+        )
     if total_skip:
         lines.append(
             paint("        SKIP = not checked (capability not built, or no run data). Not a failure.", _DIM)
@@ -960,6 +1497,7 @@ def _as_jsonable(results: Sequence[PackResult]) -> dict:
             "passed": r.passed,
             "failed": r.failed,
             "skipped": r.skipped,
+            "marginal": r.marginal,
             "ok": r.ok,
             "checks": [
                 {
@@ -968,6 +1506,7 @@ def _as_jsonable(results: Sequence[PackResult]) -> dict:
                     "detail": c.detail,
                     "expected": c.expected,
                     "actual": c.actual,
+                    "marginal": c.marginal,
                 }
                 for c in r.checks
             ],
@@ -981,6 +1520,7 @@ def _as_jsonable(results: Sequence[PackResult]) -> dict:
             "passed": sum(p["passed"] for p in packs),
             "failed": sum(p["failed"] for p in packs),
             "skipped": sum(p["skipped"] for p in packs),
+            "marginal": sum(p["marginal"] for p in packs),
             "ok": all(p["ok"] for p in packs),
         },
     }
@@ -1044,9 +1584,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.quiet:
         passed = sum(r.passed for r in results)
         skipped = sum(r.skipped for r in results)
+        marginal = sum(r.marginal for r in results)
         verdict = "OK" if failed == 0 else "FAILED"
         print(
-            f"{len(results)} pack(s): {passed} passed, {failed} failed, {skipped} skipped -> {verdict}"
+            f"{len(results)} pack(s): {passed} passed, {failed} failed, {skipped} skipped, "
+            f"{marginal} marginal -> {verdict}"
         )
     else:
         use_colour = {"auto": None, "always": True, "never": False}[args.colour]
