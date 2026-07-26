@@ -15,6 +15,10 @@
 #   C:\Users\raj_k\AppData\Local\Programs\Python\Python312\python.exe   (3.12.4)
 #
 # Install with:  setup_env.ps1  (PowerShell)  or  ./setup_env.sh  (bash)
+#
+# jaclang is PINNED, not >=, because specific 0.16.7 syntax and compiler bugs
+# (see JAC_SETUP.md) were verified by running -- a floating >=0.16 can silently
+# pick up a newer release whose syntax or compiler behaviour has moved.
 # ============================================================================
 
 jaclang==0.16.7
@@ -24,3 +28,8 @@ pytest==9.1.1
 
 # Phase 3.5 geofencing: point-in-polygon via STRtree, in-memory, no PostGIS.
 shapely==2.1.2
+
+# by llm() brief generation (jac/alerts.jac, jac/brief.jac). Falls back to a
+# deterministic template with no key and no network -- see JAC_SETUP.md.
+byllm>=0.6
+litellm>=1.40
