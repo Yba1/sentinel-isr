@@ -30,8 +30,10 @@ Identity is never used for association — recovering it from kinematics alone i
 | 40x40 solve | < 20 ms | **0.95 ms** |
 | Zero measurements / zero tracks / all gated out | no crash, well-formed result | covered for both algorithms |
 
-Over **200 unscreened seeds** of an 18 kn, 30 s revisit crossing: greedy lost identity on
-9 runs (30 switches), global on 1 run (2 switches) — greedy switches **15x as often**.
+Over **800 unscreened seeds** of an 18 kn, 30 s revisit crossing (four disjoint 200-seed
+windows): greedy lost identity 116 times, global 22 — greedy switches about **5x as
+often**. Per-window the ratio moves between 3.8x and 15x, so the pooled figure is the one
+to quote.
 
 That ratio, not a "global never fails", is the honest claim. In a symmetric two-target
 crossing the two failure probabilities are tied together by the geometry, so there is no

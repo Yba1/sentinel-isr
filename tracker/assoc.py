@@ -223,8 +223,15 @@ class Track:
         return self.kf.cov[:2, :2]
 
     def register_hit(self, d2: float, logdet_S: float,
-                     params: AssocParams = DEFAULT_PARAMS) -> None:
-        """Record an association with squared Mahalanobis ``d2`` and ``logdet_S``."""
+                     params: AssocParams | None = None) -> None:
+        """Record an association with squared Mahalanobis ``d2`` and ``logdet_S``.
+
+        Falls back to the params the track was built with. Defaulting to
+        DEFAULT_PARAMS instead would silently apply stock thresholds to a track
+        constructed with tuned ones -- which matters once Phase 3 spawns tracks
+        in bulk from a hypothesis branch.
+        """
+        params = self.params if params is None else params
         if self.status == "dead":
             return  # dead is absorbing
 
@@ -249,8 +256,12 @@ class Track:
 
         self._apply_llr_floor(params)
 
-    def register_miss(self, params: AssocParams = DEFAULT_PARAMS) -> None:
-        """Record that no measurement was associated to this track this frame."""
+    def register_miss(self, params: AssocParams | None = None) -> None:
+        """Record that no measurement was associated to this track this frame.
+
+        Falls back to the track's own params; see :meth:`register_hit`.
+        """
+        params = self.params if params is None else params
         if self.status == "dead":
             return
 

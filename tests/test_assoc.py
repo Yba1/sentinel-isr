@@ -420,6 +420,12 @@ def test_ac1_crossing_statistical_advantage(capsys):
     driven through the same loop, global loses identity substantially less often.
     An earlier draft of this file pre-screened 10 seeds out of 1500; range(200) here
     is deliberate.
+
+    Checked for window-dependence over four disjoint 200-seed windows (0-200,
+    200-400, 400-600, 600-800). Global 2/7/9/4 switches against greedy 30/30/34/22,
+    so the per-window ratio moves between 3.8x and 15x and the assertion below holds
+    with room in every window. Pooled over all 800 seeds: global 22, greedy 116,
+    i.e. ~5x -- that pooled figure is the one to quote, not any single window's.
     """
     global_total = greedy_total = 0
     global_bad = greedy_bad = 0
