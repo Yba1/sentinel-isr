@@ -1,0 +1,23 @@
+# ============================================================================
+# HARD REQUIREMENT: Python >= 3.12.  Do not try to make this work on 3.11.
+#
+# jaclang uses `typing.override`, which only exists in Python 3.12+.
+# Every jaclang from 0.13.2 onward declares requires_python >= 3.12, so on a
+# 3.11 interpreter pip silently back-solves to jaclang 0.10.2 -- which then
+# dies at import with:
+#
+#     ImportError: cannot import name 'override' from 'typing'
+#
+# There is NO jaclang release that works on Python 3.11. (jaclang 2.0.0 exists
+# on PyPI but is YANKED -- do not use it.)
+#
+# Known-good interpreter on this machine:
+#   C:\Users\raj_k\AppData\Local\Programs\Python\Python312\python.exe   (3.12.4)
+#
+# Install with:  setup_env.ps1  (PowerShell)  or  ./setup_env.sh  (bash)
+# ============================================================================
+
+jaclang==0.16.7
+numpy==2.5.1
+scipy==1.18.0
+pytest==9.1.1

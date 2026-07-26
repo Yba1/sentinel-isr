@@ -10,6 +10,10 @@ env/
 .idea/
 .DS_Store
 
+# Jac build/state junk. `.jac/` matches at any depth, so it covers both the repo-root
+# .jac/data/ session db and jac/.jac/cache/. It does NOT touch jac/*.jac source files.
+.jac/
+
 # Data is fetched, not committed (AIS windows are large; geo layers are Tier A/B downloads)
 data/
 geo/
