@@ -14,10 +14,65 @@ Identity is never used for association — recovering it from kinematics alone i
 
 | Phase | Module | State |
 |---|---|---|
-| 1 | `tracker/kalman.py` — constant-velocity Kalman filter | **done**, 27 tests passing |
-| 2 | Mahalanobis gating + Hungarian assignment | not started |
+| 1 | `tracker/kalman.py` — constant-velocity Kalman filter | **done**, 27 tests |
+| 2 | `tracker/assoc.py`, `tracker/metrics.py` — gating, NLL cost, padded Hungarian, lifecycle | **done**, 95 tests |
 | 3 | Hypothesis branching as Jac walker spawning | not started |
 | 4 | Geofence intrusion + dark-vessel re-association | not started |
+
+122 tests total, all passing.
+
+## Phase 2 acceptance
+
+| Criterion | Target | Measured |
+|---|---|---|
+| Crossing targets: greedy loses identity, global does not | greedy >= 1 switch, global 0 | deterministic trap: **greedy 2, global 0** |
+| ID-switch counter vs held-out identity, exposed in metrics | CLEAR-MOT | `tracker/metrics.py`, tested directly |
+| 40x40 solve | < 20 ms | **0.95 ms** |
+| Zero measurements / zero tracks / all gated out | no crash, well-formed result | covered for both algorithms |
+
+Over **200 unscreened seeds** of an 18 kn, 30 s revisit crossing: greedy lost identity on
+9 runs (30 switches), global on 1 run (2 switches) — greedy switches **15x as often**.
+
+That ratio, not a "global never fails", is the honest claim. In a symmetric two-target
+crossing the two failure probabilities are tied together by the geometry, so there is no
+configuration where global is clean on every seed while greedy visibly fails. The
+deterministic trap above is the case where global's advantage is structural rather than
+statistical: a converged track sits nearer its neighbour's plot, greedy commits to it,
+and the neighbour is left starved.
+
+## Association design
+
+Costs are negative log-likelihoods so that assign, miss and birth are commensurable in one
+linear assignment solve:
+
+```
+cost_assign = 0.5*d2 + log(2*pi) + 0.5*logdet(S) - log(p_D)
+cost_miss   = -log(1 - p_D)
+cost_birth  = -log(beta_fa)
+```
+
+The determinant term charges a track for its own uncertainty. Without it, a coasting track
+with a covariance the size of a harbour would hoover up its neighbours' measurements,
+because inflating S shrinks every d2 it produces. It does **not** decide the symmetric
+crossing — equal S cancels there — it earns its keep when a confident track competes
+against an uncertain one.
+
+Gating is batched: one broadcast `np.linalg.solve` and one `slogdet` build the whole
+(N, M) problem, never an explicit inverse and never a per-pair call. Gated-out pairs carry
+a finite `BIG = cost_miss + cost_birth + 1`, provably dominated by taking miss+birth, which
+avoids inf/nan inside the augmenting-path reduction.
+
+`associate_greedy` shares the same gate and the same cost matrix — only the strategy
+differs. Swapping the distance metric too would rig the comparison.
+
+### Known constraint for Phase 4
+
+`max_assignable_sigma()` — above a certain prediction uncertainty, `cost_assign` exceeds
+`cost_miss + cost_birth` even at d2 = 0, so a measurement sitting exactly on the prediction
+is still declared a birth. At the default `beta_fa = 1e-6` the ceiling is **1197 m**, and
+the chi-squared gate is not what rejects it. This governs how long a dark vessel stays
+re-acquirable, so dark-vessel re-association will need a smaller `beta_fa` or a
+re-association step that does not compete against birth in the same solve. Pinned as a test.
 
 ## Phase 1 acceptance
 
