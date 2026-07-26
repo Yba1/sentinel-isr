@@ -5,7 +5,8 @@
   "seed": 20260726,
   "origin": {"lat": 36.75, "lon": -121.95},
   "bbox": {"lon_min": -123.2, "lat_min": 35.4, "lon_max": -121.0, "lat_max": 38.0},
-  "time_window": {"start": "2024-06-15T06:00:00+00:00", "end": "2024-06-15T08:00:00+00:00"},
+  "time_window": {"start": "2024-06-15T17:55:00+00:00", "end": "2024-06-15T19:55:00+00:00"},
+  "ais_csv": "ais_window.csv",
   "frame_interval_s": 30.0,
   "ais_required": false,
   "geofence_layers": [

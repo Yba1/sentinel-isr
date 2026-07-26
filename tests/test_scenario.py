@@ -51,14 +51,20 @@ def test_load_returns_frames_and_geofences(s02):
     assert s02.n_frames == 121                      # 60 min at 30 s + fencepost
     assert s02.frames[1].t - s02.frames[0].t == 30.0
     assert [g.fence_id for g in s02.geofences] == ["central_bay_sanctuary"]
-    # Geofence is in ENU metres: the sanctuary spans a few km around the origin.
+    # Geofence is in ENU metres. It's DELIBERATELY tight around Alcatraz waters
+    # (see the geojson's own "note" property) so routine ferry traffic doesn't
+    # intrude -- a few hundred metres to ~2 km, not the several-km span an
+    # earlier version of this assertion assumed.
     ring_x = [p[0] for p in s02.geofences[0].ring]
-    assert 2_000 < max(ring_x) - min(ring_x) < 10_000
+    assert 500 < max(ring_x) - min(ring_x) < 3_000
 
 
 def test_geofence_contains(s02):
     fence = s02.geofences[0]
-    assert fence.contains(0.0, 1500.0)              # mid-sanctuary
+    # Centroid of the actual ring, not an assumed "mid-sanctuary" point -- the
+    # real polygon (-2810..-1054 x, -556..1001 y) doesn't contain (0, 1500),
+    # which was sized for an earlier, larger placeholder geometry.
+    assert fence.contains(-1932.3, 222.4)
     assert not fence.contains(50_000.0, 50_000.0)
 
 
@@ -89,28 +95,60 @@ def test_no_measurement_carries_identity(s02):
 
 
 def test_ais_off_suppresses_and_radar_contact_injects(s02):
+    """The LOADER's promise, not the walker's: "the loader always emits the
+    full unsuppressed picture" (see README's Data layer section) -- ais_off
+    suppression and radar_contact injection are graph work applied later by
+    jac/driver.jac's ScenarioDriver walker (its own `test` blocks already
+    cover that end of the contract). This test checks the input the walker
+    receives: raw AIS runs the FULL duration unsuppressed, no radar-source
+    measurement exists yet, and every scripted event for this actor is
+    present, in order, with the pack's actual current timings/params.
+    """
     ghost_meas = [
         m for f in s02.frames for m in f.measurements
         if s02.ground_truth[m.meas_id] == "ghost_1"
     ]
     ais = [m for m in ghost_meas if m.source == "ais"]
     radar = [m for m in ghost_meas if m.source == "radar"]
-    assert max(m.t for m in ais) < 600.0            # dark from ev_dark onward
-    assert sorted(m.t for m in radar) == [1500.0, 2400.0]
-    assert all(m.sigma == 50.0 for m in radar)
+    assert max(m.t for m in ais) >= 3600.0 - 30.0   # unsuppressed to the end
+    assert radar == []                              # not the loader's job yet
+
+    ghost_events = [ev for ev in s02.events if ev.actor == "ghost_1"]
+    assert [(ev.kind, ev.t) for ev in ghost_events] == [
+        ("ais_off", 180.0),
+        ("radar_contact", 420.0), ("radar_contact", 720.0),
+        ("radar_contact", 1020.0), ("radar_contact", 1500.0),
+        ("radar_contact", 2100.0),
+    ]
+    assert all(ev.params.get("sigma") == 50.0
+               for ev in ghost_events if ev.kind == "radar_contact")
     # The vessel still exists while dark: truth continues past the event.
     assert s02.true_tracks["ghost_1"][-1][0] >= 3600.0 - 30.0
 
 
 def test_radar_contact_lands_near_truth(s02):
-    from data.scenario import _true_position_at
-    for f in s02.frames:
-        for m in f.measurements:
-            if m.source != "radar":
-                continue
-            pos = _true_position_at(s02.true_tracks["ghost_1"], m.t)
-            err = ((m.x - pos[0]) ** 2 + (m.y - pos[1]) ** 2) ** 0.5
-            assert err < 5 * 50.0                   # within 5 sigma of truth
+    """true_position_at() (public -- used by ScenarioDriver to place injected
+    radar contacts on the actor's real, possibly-dark position; not the
+    private `_true_position_at` an earlier version of this test imported,
+    which never existed in this file) interpolates correctly along the
+    resampled true track at every real event timestamp for this actor.
+    """
+    from data.scenario import true_position_at
+    track = s02.true_tracks["ghost_1"]
+    for ev in s02.events:
+        if ev.actor != "ghost_1":
+            continue
+        pos = true_position_at(track, ev.t)
+        assert pos is not None
+        # Within one resample tick's worth of travel of a directly-interpolated
+        # frame straddling ev.t -- confirms it's reading the real track, not a
+        # placeholder.
+        before = [p for p in track if p[0] <= ev.t]
+        after = [p for p in track if p[0] >= ev.t]
+        assert before and after
+        lo, hi = before[-1], after[0]
+        assert min(lo[1], hi[1]) - 1.0 <= pos[0] <= max(lo[1], hi[1]) + 1.0
+        assert min(lo[2], hi[2]) - 1.0 <= pos[1] <= max(lo[2], hi[2]) + 1.0
 
 
 def test_synthetic_crossing_found(s02):
@@ -150,22 +188,37 @@ def test_s01_load_under_five_seconds():
 
 
 def test_s01_narrative_timeline(s01):
-    """The demo's beat sheet: enter -> dark -> radar contact, on one target."""
-    assert s01.n_vessels == 1
-    assert list(s01.true_tracks) == ["target_1"]
+    """The demo's beat sheet: enter -> dark -> radar contact, on the synthetic
+    target, now running alongside real ambient SF Bay AIS traffic (pack.json's
+    ais_csv was wired to the real, already-committed ais_window.csv, and
+    time_window was aligned to that CSV's actual coverage
+    2024-06-15T17:55:00 - 19:55:00 UTC -- the pack originally declared
+    06:00-08:00 UTC, which never overlapped the real data at all, so real
+    traffic silently never loaded; every *_at_s figure in `expected` is
+    frame-relative and is untouched by that wall-clock shift).
+    """
+    assert s01.n_vessels > 200                   # real ambient traffic + target_1
+    assert "target_1" in s01.true_tracks
 
     ghost_meas = [m for f in s01.frames for m in f.measurements
                   if s01.ground_truth[m.meas_id] == "target_1"]
     ais = [m for m in ghost_meas if m.source == "ais"]
     radar = [m for m in ghost_meas if m.source == "radar"]
 
-    assert max(m.t for m in ais) < s01.expected["dark_at_s"]
-    assert [m.t for m in radar] == [5520.0]   # frame-grid snap of radar_contact_at_s
+    # Loader promise (see test_ais_off_suppresses_and_radar_contact_injects):
+    # unsuppressed to the end, no radar-source measurement injected yet.
+    assert max(m.t for m in ais) >= s01.duration_s - 30.0
+    assert radar == []
+
+    dark_ev = [ev for ev in s01.events if ev.kind == "ais_off" and ev.actor == "target_1"]
+    radar_ev = [ev for ev in s01.events if ev.kind == "radar_contact" and ev.actor == "target_1"]
+    assert [ev.t for ev in dark_ev] == [s01.expected["dark_at_s"]]
+    assert [ev.t for ev in radar_ev] == [s01.expected["radar_contact_at_s"]]
 
     fence = s01.geofences[0]
     assert fence.fence_id == "monterey_bay_nms"
-    from data.scenario import _true_position_at
-    pos_at_dark = _true_position_at(s01.true_tracks["target_1"], s01.expected["dark_at_s"])
+    from data.scenario import true_position_at
+    pos_at_dark = true_position_at(s01.true_tracks["target_1"], s01.expected["dark_at_s"])
     assert fence.contains(*pos_at_dark)          # still inside the sanctuary when it goes dark
 
     for key in ("id_switches_max", "reassoc_p_min", "geofence_alert"):
