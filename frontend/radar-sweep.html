@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<script>window.OM_SCENES = '[{"name":"Radar","dur":12}]';</script>
+<script>window.OM_PLAYBACK = '{"mode":"times","count":1}';</script>
+<style>
+  html, body { margin:0; padding:0; background:#04070a; }
+  * { box-sizing:border-box; }
+  a { color:#3bf58a; text-decoration:none; }
+  a:hover { color:#8dffc2; }
+</style>
+</helmet>
+<x-import component-from-global-scope="RadarPiece" from="./animations-v2.jsx ./radar-scene.jsx" hint-size="100%,100%"></x-import>
+
+</x-dc>
+</body>
+</html>

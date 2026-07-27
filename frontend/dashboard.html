@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  html, body { margin:0; padding:0; background:#06080a; }
+  * { box-sizing:border-box; }
+  a { color:#5ec8d8; text-decoration:none; }
+  a:hover { color:#8fe0ec; }
+  ::-webkit-scrollbar { width:6px; height:6px; }
+  ::-webkit-scrollbar-thumb { background:#1e272e; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  .leaflet-container { background:#080d11; font-family:'IBM Plex Mono', monospace; }
+  .leaflet-control-attribution { background:rgba(8,13,17,.8) !important; color:#3f4c55 !important; font-size:10px !important; }
+  .leaflet-control-attribution a { color:#4f606b !important; }
+  .leaflet-control-zoom a { background:#111a20 !important; color:#8fa0aa !important; border-color:#22303a !important; }
+  .leaflet-tile-pane { filter:saturate(0.55) brightness(0.82) contrast(1.08); }
+</style>
+</helmet>
+
+<div style="position:relative;width:100vw;height:100vh;overflow:hidden;background:#06080a;color:#c3ced4;font-family:'IBM Plex Sans',system-ui,sans-serif;display:flex;flex-direction:column">
+
+  <sc-if value="{{ alertActive }}" hint-placeholder-val="{{ false }}">
+    <div style="display:flex;align-items:center;gap:16px;height:36px;padding:0 18px;background:#3d0f0c;border-bottom:1px solid #ff4d3d;flex:0 0 auto">
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:.18em;color:#ff6b5c">◆ ALERT</span>
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:14px;letter-spacing:.04em;color:#ffd9d4">{{ alertText }}</span>
+      <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#c0857e">{{ alertTime }}</span>
+    </div>
+  </sc-if>
+
+  <div style="flex:1 1 auto;display:flex;min-height:0">
+
+    <!-- EVENT LOG RAIL -->
+    <div style="flex:0 0 21%;min-width:290px;display:flex;flex-direction:column;background:#080b0e;border-right:1px solid #161d23;min-height:0">
+      <div style="display:flex;align-items:baseline;gap:10px;padding:12px 14px 10px;border-bottom:1px solid #161d23">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;letter-spacing:.22em;color:#7d8d96">EVENT LOG</span>
+        <span style="margin-left:auto;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#4c5a63">{{ logCount }}</span>
+      </div>
+      <div style="flex:1 1 auto;overflow:hidden;min-height:0">
+        <sc-if value="{{ empty }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:22px 16px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:2.1;color:#2f3a42">
+            <div>— — — — — — — —</div><div>— — — — —</div><div>— — — — — — —</div><div>— — —</div>
+            <div style="margin-top:18px;color:#556169;letter-spacing:.12em">STREAM IDLE</div>
+          </div>
+        </sc-if>
+        <sc-for list="{{ logs }}" as="e" hint-placeholder-count="14">
+          <div style="display:flex;gap:9px;align-items:stretch;padding:6px 12px 6px 0;border-bottom:1px solid #0e1418;background:{{ e.bg }}">
+            <div style="flex:0 0 auto;width:{{ e.bar }};background:{{ e.color }}"></div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#5a6a73;flex:0 0 auto;padding-top:1px">{{ e.ts }}</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.35;color:{{ e.color }};letter-spacing:.01em;text-wrap:pretty">{{ e.text }}</div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <!-- MAP -->
+    <div style="flex:1 1 auto;position:relative;background:#080d11;min-width:0;overflow:hidden">
+      <div ref="{{ mapRef }}" style="position:absolute;inset:0"></div>
+
+      <svg style="position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none;z-index:500">
+        <!-- GEOFENCES -->
+        <g opacity="{{ baseOp }}">
+          <sc-for list="{{ zones }}" as="z" hint-placeholder-count="0">
+            <g>
+              <polygon points="{{ z.pts }}" fill="{{ z.fill }}" fill-opacity="0.06" stroke="{{ z.stroke }}" stroke-width="2" stroke-opacity="0.55" />
+              <text x="{{ z.lx }}" y="{{ z.ly }}" font-family="'IBM Plex Mono', monospace" font-size="14" font-weight="500" letter-spacing="2" fill="{{ z.text }}">{{ z.name }}</text>
+              <text x="{{ z.lx }}" y="{{ z.ly2 }}" font-family="'IBM Plex Mono', monospace" font-size="11" letter-spacing="1.4" fill="{{ z.sub2 }}">{{ z.sub }}</text>
+            </g>
+          </sc-for>
+          <sc-for list="{{ corridors }}" as="c" hint-placeholder-count="0">
+            <g>
+              <polyline points="{{ c.pts }}" fill="none" stroke="#5f8fb0" stroke-width="2.5" stroke-dasharray="12 9" stroke-opacity="0.65" />
+              <text x="{{ c.lx }}" y="{{ c.ly }}" transform="{{ c.tf }}" font-family="'IBM Plex Mono', monospace" font-size="13" letter-spacing="1.8" fill="#7fa9c6">{{ c.name }}</text>
+            </g>
+          </sc-for>
+        </g>
+
+        <!-- TRACKS -->
+        <sc-for list="{{ tracks }}" as="v" hint-placeholder-count="0">
+          <g opacity="{{ v.op }}">
+            <polyline points="{{ v.tail }}" fill="none" stroke="{{ v.color }}" stroke-width="1.4" stroke-opacity="0.3" stroke-dasharray="1 0" />
+            <polyline points="{{ v.head }}" fill="none" stroke="{{ v.color }}" stroke-width="2.2" stroke-opacity="0.7" />
+            <polygon points="0,-11 7.5,8.5 0,4.5 -7.5,8.5" fill="{{ v.fill }}" stroke="{{ v.color }}" stroke-width="{{ v.sw }}" stroke-dasharray="{{ v.dash }}" transform="{{ v.tf }}" />
+            <text x="{{ v.lx }}" y="{{ v.ly }}" font-family="'IBM Plex Mono', monospace" font-size="13" font-weight="500" letter-spacing="1" fill="{{ v.color }}" paint-order="stroke" stroke="#080d11" stroke-width="3">{{ v.name }}</text>
+            <text x="{{ v.lx }}" y="{{ v.ly2 }}" font-family="'IBM Plex Mono', monospace" font-size="11" fill="{{ v.sub }}" paint-order="stroke" stroke="#080d11" stroke-width="3">{{ v.meta }}</text>
+          </g>
+        </sc-for>
+
+        <!-- UNCERTAINTY -->
+        <sc-for list="{{ ellipses }}" as="u" hint-placeholder-count="0">
+          <g opacity="{{ u.op }}">
+            <ellipse cx="{{ u.x }}" cy="{{ u.y }}" rx="{{ u.rx }}" ry="{{ u.ry }}" fill="#ffb020" fill-opacity="0.11" stroke="#ffb020" stroke-width="2.5" stroke-dasharray="10 8" />
+            <ellipse cx="{{ u.x }}" cy="{{ u.y }}" rx="{{ u.rx2 }}" ry="{{ u.ry2 }}" fill="#ffb020" fill-opacity="0.10" stroke="none" />
+            <path d="{{ u.cross }}" stroke="#ffb020" stroke-width="1.6" stroke-opacity="0.85" />
+            <text x="{{ u.tx }}" y="{{ u.ty }}" font-family="'IBM Plex Mono', monospace" font-size="18" font-weight="600" letter-spacing="1.2" fill="#ffc44d" paint-order="stroke" stroke="#0d0b06" stroke-width="4">{{ u.label }}</text>
+            <text x="{{ u.tx }}" y="{{ u.ty2 }}" font-family="'IBM Plex Mono', monospace" font-size="13" letter-spacing="1" fill="#c98f28" paint-order="stroke" stroke="#0d0b06" stroke-width="4">{{ u.sub }}</text>
+          </g>
+        </sc-for>
+
+        <!-- UNLABELLED CONTACTS + RE-ATTRIBUTION -->
+        <sc-for list="{{ contacts }}" as="c" hint-placeholder-count="0">
+          <g opacity="{{ c.op }}">
+            <rect x="{{ c.x }}" y="{{ c.y }}" width="13" height="13" fill="none" stroke="#e8eef2" stroke-width="2" transform="{{ c.tf }}" />
+            <circle cx="{{ c.cx }}" cy="{{ c.cy }}" r="2" fill="#e8eef2" />
+            <text x="{{ c.lx }}" y="{{ c.ly }}" font-family="'IBM Plex Mono', monospace" font-size="12" letter-spacing="1" fill="#e8eef2" paint-order="stroke" stroke="#080d11" stroke-width="3">{{ c.label }}</text>
+          </g>
+        </sc-for>
+        <sc-for list="{{ links }}" as="l" hint-placeholder-count="0">
+          <g opacity="{{ l.op }}">
+            <line x1="{{ l.x1 }}" y1="{{ l.y1 }}" x2="{{ l.x2 }}" y2="{{ l.y2 }}" stroke="#ffb020" stroke-width="2" stroke-dasharray="6 6" />
+            <rect x="{{ l.bx }}" y="{{ l.by }}" width="104" height="28" fill="#241a06" stroke="#ffb020" stroke-width="1.5" />
+            <text x="{{ l.tx }}" y="{{ l.ty }}" font-family="'IBM Plex Mono', monospace" font-size="16" font-weight="600" fill="#ffc44d">{{ l.label }}</text>
+          </g>
+        </sc-for>
+
+        <g font-family="'IBM Plex Mono', monospace" font-size="11" fill="#7d8d96" letter-spacing="1.4">
+          <line x1="20" y1="{{ scaleY }}" x2="{{ scaleX }}" y2="{{ scaleY }}" stroke="#7d8d96" stroke-width="2" />
+          <line x1="20" y1="{{ scaleY1 }}" x2="20" y2="{{ scaleY2 }}" stroke="#7d8d96" stroke-width="2" />
+          <line x1="{{ scaleX }}" y1="{{ scaleY1 }}" x2="{{ scaleX }}" y2="{{ scaleY2 }}" stroke="#7d8d96" stroke-width="2" />
+          <text x="20" y="{{ scaleTY }}">{{ scaleLabel }}</text>
+        </g>
+      </svg>
+
+      <sc-if value="{{ empty }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding-top:150px;background:rgba(6,8,10,.72);z-index:900;pointer-events:none">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:15px;letter-spacing:.42em;color:#4d5a63">SENTINEL — ISR</div>
+          <div style="font-family:'IBM Plex Sans',sans-serif;font-size:38px;font-weight:600;letter-spacing:.02em;color:#8b9aa3">NO SCENARIO LOADED</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:14px;letter-spacing:.16em;color:#556169">SELECT A SCENARIO IN THE CONTROL BAR ↓</div>
+        </div>
+      </sc-if>
+
+      <!-- AREA OF OPERATIONS -->
+      <div style="position:absolute;top:14px;left:16px;z-index:700;display:flex;flex-direction:column;gap:7px;background:rgba(8,13,17,.9);border:1px solid #1b242c;padding:9px 11px">
+        <div onClick="{{ toggleAO }}" style="display:flex;align-items:center;gap:10px;cursor:pointer">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.1em;color:#5ec8d8">◉ {{ placeName }}</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.14em;color:{{ modeColor }}">{{ modeTag }}</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.14em;color:#5a6a73">{{ aoCaret }}</span>
+        </div>
+        <sc-if value="{{ aoOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;align-items:stretch;gap:7px;width:288px">
+          <input ref="{{ inputRef }}" onKeyDown="{{ onSearchKey }}" placeholder="type any port, coast or city…" style="width:270px;background:#0c1318;border:1px solid #23303a;color:#dbe5ea;font-family:'IBM Plex Mono',monospace;font-size:13px;letter-spacing:.06em;padding:8px 10px;outline:none;width:100%" />
+          <div style="display:flex;gap:7px">
+          <div onClick="{{ doSearch }}" style="cursor:pointer;padding:8px 13px;background:#131b21;border:1px solid #2a353d;font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;letter-spacing:.16em;color:#8fa0aa" style-hover="background:#1a242b;color:#dbe5ea">RELOCATE</div>
+          <div onClick="{{ refit }}" style="cursor:pointer;padding:8px 13px;background:#131b21;border:1px solid #2a353d;font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;letter-spacing:.16em;color:#8fa0aa" style-hover="background:#1a242b;color:#dbe5ea">◎ REFIT</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.08em">
+          <span style="color:#4f5d66">{{ placeCoords }}</span>
+          <span style="color:{{ searchColor }}">{{ searchMsg }}</span>
+        </div>
+        </sc-if>
+      </div>
+
+      <div style="position:absolute;top:14px;right:16px;display:flex;flex-direction:column;align-items:flex-end;gap:8px;z-index:700">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:26px;font-weight:500;letter-spacing:.06em;color:#dbe5ea;background:rgba(8,13,17,.85);border:1px solid #1b242c;padding:5px 12px">{{ clock }}</div>
+        <div onClick="{{ toggleBrief }}" style="cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:.18em;color:#0a1013;background:#5ec8d8;border:1px solid #5ec8d8;padding:9px 14px" style-hover="background:#8fe0ec">{{ briefBtn }}</div>
+      </div>
+
+      <sc-if value="{{ legend }}" hint-placeholder-val="{{ true }}">
+        <div style="position:absolute;bottom:14px;left:16px;z-index:700;display:flex;flex-direction:column;gap:6px;background:rgba(8,13,17,.85);border:1px solid #1b242c;padding:10px 13px;font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.1em">
+          <div style="display:flex;align-items:center;gap:9px;color:#8fa0aa"><span style="width:11px;height:11px;background:#5ec8d8"></span>CONFIRMED</div>
+          <div style="display:flex;align-items:center;gap:9px;color:#8fa0aa"><span style="width:11px;height:11px;border:1.5px solid #5ec8d8;opacity:.45"></span>TENTATIVE</div>
+          <div style="display:flex;align-items:center;gap:9px;color:#ffc44d"><span style="width:11px;height:11px;border:1.5px dashed #ffb020"></span>DARK / COASTING</div>
+          <div style="display:flex;align-items:center;gap:9px;color:#8fa0aa"><span style="width:11px;height:11px;border:1.5px solid #e8eef2;transform:rotate(45deg)"></span>UNLABELLED CONTACT</div>
+        </div>
+      </sc-if>
+
+      <!-- INTEL BRIEF PANEL -->
+      <sc-if value="{{ brief }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;top:0;right:0;bottom:0;width:430px;background:#090d11;border-left:1px solid #22303a;display:flex;flex-direction:column;box-shadow:-30px 0 60px rgba(0,0,0,.55);z-index:800">
+          <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid #182129">
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;letter-spacing:.22em;color:#5ec8d8">INTELLIGENCE BRIEF</span>
+            <span onClick="{{ toggleBrief }}" style="margin-left:auto;cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.14em;color:#8fa0aa;border:1px solid #2a353d;padding:5px 10px" style-hover="color:#dbe5ea">CLOSE ✕</span>
+          </div>
+          <div style="padding:12px 16px;border-bottom:1px solid #182129;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.7;letter-spacing:.06em;color:#6c7c86">
+            GENERATED {{ clock }} · {{ briefModel }}<br />CLICK ANY SENTENCE TO ISOLATE ITS EVIDENCE ON THE MAP
+          </div>
+          <div style="flex:1 1 auto;overflow-y:auto;padding:6px 10px 20px">
+            <sc-for list="{{ sentences }}" as="s" hint-placeholder-count="5">
+              <div onClick="{{ s.click }}" style="display:flex;gap:10px;cursor:pointer;padding:12px 10px;border-left:3px solid {{ s.mark }};background:{{ s.bg }};margin-bottom:4px" style-hover="background:#121a20">
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:{{ s.mark }};flex:0 0 auto">▸</span>
+                <span style="font-family:'IBM Plex Sans',sans-serif;font-size:15.5px;line-height:1.6;color:{{ s.fg }};text-wrap:pretty">{{ s.text }}</span>
+              </div>
+            </sc-for>
+            <div style="margin:14px 10px 0;padding-top:12px;border-top:1px solid #182129;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.8;color:#4f5d66;letter-spacing:.05em">{{ briefFooter }}</div>
+          </div>
+          <sc-if value="{{ focusOn }}" hint-placeholder-val="{{ false }}">
+            <div onClick="{{ clearFocus }}" style="cursor:pointer;padding:13px 16px;background:#12212a;border-top:1px solid #22303a;font-family:'IBM Plex Mono',monospace;font-size:13px;letter-spacing:.14em;color:#5ec8d8;text-align:center">◀ CLEAR EVIDENCE ISOLATION</div>
+          </sc-if>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+
+  <!-- CONTROL BAR -->
+  <div style="flex:0 0 auto;display:flex;align-items:stretch;flex-wrap:wrap;background:#080b0e;border-top:1px solid #1b242c">
+    <div style="display:flex;flex-direction:column;gap:9px;padding:12px 18px;border-right:1px solid #161d23;flex:1 1 440px;min-width:440px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div onClick="{{ togglePlay }}" style="cursor:pointer;width:46px;height:38px;display:flex;align-items:center;justify-content:center;background:#131b21;border:1px solid #2a353d;color:#dbe5ea;font-size:15px" style-hover="background:#1a242b">{{ playIcon }}</div>
+        <sc-for list="{{ speeds }}" as="s" hint-placeholder-count="3">
+          <div onClick="{{ s.click }}" style="cursor:pointer;padding:9px 14px;font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;letter-spacing:.06em;background:{{ s.bg }};color:{{ s.fg }};border:1px solid {{ s.bd }}">{{ s.label }}</div>
+        </sc-for>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:13px;letter-spacing:.14em;color:#5a6a73;margin-left:6px">{{ elapsed }} / 15:00 REPLAY</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.14em;color:#3e4a52;margin-left:auto;white-space:nowrap">SPACE PLAY · ←→ ±10s · M MODE</div>
+      </div>
+      <div onMouseDown="{{ scrub }}" style="position:relative;height:20px;cursor:pointer;display:flex;align-items:center">
+        <div style="position:absolute;left:0;right:0;height:6px;background:#141c22;border:1px solid #202a32"></div>
+        <div style="position:absolute;left:0;height:6px;width:{{ progress }};background:#2f6d7a"></div>
+        <sc-for list="{{ marks }}" as="m" hint-placeholder-count="0">
+          <div style="position:absolute;top:0;height:20px;width:2px;left:{{ m.left }};background:{{ m.color }}"></div>
+        </sc-for>
+        <div style="position:absolute;top:-3px;width:4px;height:26px;background:#dbe5ea;left:{{ progress }}"></div>
+      </div>
+    </div>
+
+    <div style="display:flex;align-items:center;padding:12px 18px;border-right:1px solid #161d23;flex:0 0 auto">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.24em;color:#5a6a73">ASSOCIATION</div>
+        <div style="display:flex;border:2px solid {{ modeColor }}">
+          <div onClick="{{ setNaive }}" style="cursor:pointer;padding:11px 26px;font-family:'IBM Plex Sans',sans-serif;font-size:19px;font-weight:700;letter-spacing:.12em;background:{{ naiveBg }};color:{{ naiveFg }}">NAIVE</div>
+          <div onClick="{{ setMht }}" style="cursor:pointer;padding:11px 26px;font-family:'IBM Plex Sans',sans-serif;font-size:19px;font-weight:700;letter-spacing:.12em;background:{{ mhtBg }};color:{{ mhtFg }}">MHT</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:26px;padding:10px 22px;border-right:1px solid #161d23;flex:0 0 auto">
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:600;letter-spacing:.2em;color:{{ switchLabel }}">ID SWITCHES</div>
+        <div style="font-family:'IBM Plex Sans',sans-serif;font-size:62px;line-height:1.05;font-weight:700;letter-spacing:-.02em;color:{{ switchColor }}">{{ idSwitches }}</div>
+      </div>
+      <sc-for list="{{ metrics }}" as="m" hint-placeholder-count="4">
+        <div style="display:flex;flex-direction:column;gap:3px">
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.18em;color:#5a6a73">{{ m.label }}</div>
+          <div style="font-family:'IBM Plex Sans',sans-serif;font-size:27px;line-height:1.15;font-weight:600;color:#b7c4cb">{{ m.value }}</div>
+        </div>
+      </sc-for>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:6px;padding:12px 18px;flex:0 0 auto">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.24em;color:#5a6a73">SCENARIO</div>
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <sc-for list="{{ scenarios }}" as="s" hint-placeholder-count="3">
+          <div onClick="{{ s.click }}" style="cursor:pointer;display:flex;align-items:center;gap:9px;padding:6px 12px;background:{{ s.bg }};border:1px solid {{ s.bd }};font-family:'IBM Plex Mono',monospace;font-size:13px;letter-spacing:.08em;color:{{ s.fg }};white-space:nowrap" style-hover="background:#131b21">
+            <span style="width:7px;height:7px;background:{{ s.dot }}"></span>{{ s.label }}
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1600,&quot;height&quot;:940},&quot;startScenario&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;&quot;,&quot;nms&quot;,&quot;gate&quot;,&quot;cable&quot;],&quot;default&quot;:&quot;&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Demo&quot;},&quot;showLegend&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Map&quot;},&quot;clutterContacts&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Map&quot;}}">
+const DUR = 900;
+// authoring grid: 1 unit = 0.0005 deg lat (~55.6 m). Geometry is authored once and
+// re-anchored to whatever place the operator types in.
+const K = 2000, COSLAT = 0.7916, LON0 = -122.75, LAT0 = 37.92;
+const HOME = { name:'SAN FRANCISCO BAY', lat:37.72, lng:-122.43, zoom:12 };
+const ANCHOR = { x:500, y:400 };
+
+const R = {
+  in:  [[60,300],[240,255],[380,232],[430,222],[520,206],[600,216],[662,242]],
+  out: [[700,252],[600,232],[500,214],[430,224],[350,252],[180,322],[40,382]],
+  sw:  [[520,190],[432,212],[330,292],[236,418],[186,556],[150,700]],
+  sb:  [[860,520],[900,600],[940,690],[962,782]],
+  fer: [[566,232],[604,272],[650,292],[606,246],[566,230]],
+  cab: [[452,240],[352,306],[300,330],[220,392],[174,430],[70,486]],
+  nb:  [[556,40],[586,110],[600,170],[624,232],[652,268]],
+  oc:  [[40,640],[130,548],[228,448],[316,352],[392,286]],
+  sbx: [[688,318],[772,410],[838,516],[884,624],[918,706]],
+  gg2: [[540,236],[452,262],[344,320],[228,392],[120,452]],
+  tug: [[664,258],[706,300],[742,352],[706,302],[664,256]],
+  fis: [[812,652],[872,694],[928,752],[956,806]],
+  pat: [[240,236],[318,286],[408,300],[498,286],[566,258]]
+};
+const ZONES = [
+  { pts:[[0,240],[277,370],[325,610],[206,900],[0,960]], stroke:'#8b7ce8', fill:'#6b5ce0', text:'#9d90ee', sub2:'#6a5fa8', lx:34, ly:560, key:'nms', sub:'PROTECTED · NO-DARK ZONE' },
+  { pts:[[630,196],[731,204],[757,290],[649,296]], stroke:'#3fa08a', fill:'#3fa08a', text:'#57b8a1', sub2:'#3a7a6c', lx:600, ly:170, key:'port', name:'PORT ZONE', sub:'RESTRICTED BERTHING' }
+];
+const CORRIDOR = { pts:[[452,240],[300,330],[174,430],[0,520]], name:'SUBMARINE CABLE CORRIDOR' };
+const C = { cyan:'#5ec8d8', dim:'#31606b', amber:'#ffb020' };
+
+function plen(r){ let d=0, segs=[]; for(let i=1;i<r.length;i++){ segs.push(Math.hypot(r[i][0]-r[i-1][0], r[i][1]-r[i-1][1])); d+=segs[i-1]; } return {segs, total:d}; }
+function at(r, d){
+  const {segs,total} = plen(r);
+  d = Math.max(0, Math.min(total, d));
+  let acc = 0;
+  for(let i=0;i<segs.length;i++){
+    if(acc+segs[i] >= d || i === segs.length-1){
+      const f = segs[i] ? (d-acc)/segs[i] : 0, a = r[i], b = r[i+1];
+      return { x:a[0]+(b[0]-a[0])*f, y:a[1]+(b[1]-a[1])*f, total };
+    }
+    acc += segs[i];
+  }
+  return { x:r[0][0], y:r[0][1], total };
+}
+function lcg(seed){ let s = seed; return () => { s = (s*1103515245+12345)%2147483648; return s/2147483648; }; }
+
+const SCEN = {
+  nms: {
+    label:'DARK VESSEL · ZONE', dot:'#ffb020',
+    vessels:[
+      {id:'V3', name:'MV SABLE ROCK', meta:'366902110 · 14.2 kn', route:R.sw, sp:0.62, start:20, ev:'V3', dark:{at:300, reacq:520, prob:'p = 0.87', unk:'UNK-07'}},
+      {id:'V1', name:'MV KESTREL', meta:'367441220 · 11.8 kn', route:R.in, sp:0.70, start:0, ev:'CROSS'},
+      {id:'V2', name:'HANJIN AURORA', meta:'477889100 · 16.4 kn', route:R.out, sp:0.66, start:35, ev:'CROSS'},
+      {id:'V4', name:'FV MARIA T', meta:'tentative · 3 plots', route:R.sb, sp:0.42, start:0, tent:true, ev:'OTHER'},
+      {id:'V5', name:'HARBOUR FERRY 3', meta:'366100440 · 22.0 kn', route:R.fer, sp:0.85, start:0, ev:'OTHER'},
+      {id:'V7', name:'MV COLUMBIA', meta:'316045990 · 12.6 kn', route:R.nb, sp:0.58, start:15, ev:'OTHER'},
+      {id:'V8', name:'MSC LUMEN', meta:'255806040 · 18.9 kn', route:R.sbx, sp:0.74, start:70, ev:'OTHER'},
+      {id:'V9', name:'TUG RAVEN', meta:'366774310 · 7.4 kn', route:R.tug, sp:0.5, start:0, ev:'OTHER'},
+      {id:'V10', name:'PATROL 12', meta:'368091700 · 24.5 kn', route:R.pat, sp:0.95, start:120, ev:'OTHER'},
+      {id:'V11', name:'FV BLUE HERON', meta:'tentative · 4 plots', route:R.fis, sp:0.38, start:40, tent:true, ev:'OTHER'},
+      {id:'V12', name:'RV SEAWATCH', meta:'tentative · 2 plots', route:R.oc, sp:0.46, start:200, tent:true, ev:'OTHER'}
+    ],
+    switches:[180,300,412,520,655,760,835],
+    alerts:[
+      [300,'MV SABLE ROCK went dark inside {Z}'],
+      [306,'geofence intrusion · {Z} · t_03 coasting on prediction'],
+      [520,'unlabelled contact UNK-07 inside t_03 coast region'],
+      [566,'re-attribution UNK-07 → MV SABLE ROCK · p = 0.87']
+    ],
+    sentences:[
+      ['MV SABLE ROCK ceased AIS transmission at 14:07:20Z, 2.1 nm inside {Z}.','V3'],
+      ['The coasting prediction held the track for 3 min 40 s; the 95% region grew to a 1.6 km radius before any new plot arrived.','ELLIPSE'],
+      ['Unlabelled radar contact UNK-07 entered that region on a heading within 4° of the vessel\u2019s last known course.','CONTACT'],
+      ['Re-attribution of UNK-07 to SABLE ROCK carries p = 0.87; no competing track falls inside the association gate.','LINK'],
+      ['Two hypotheses remain open on the KESTREL / AURORA crossing at the channel mouth. Neither bears on the protected-area finding.','CROSS']
+    ],
+    footer:'Identity was never used for association. Recovered from kinematics only.'
+  },
+  gate: {
+    label:'CHANNEL CROSSING', dot:'#5ec8d8',
+    vessels:[
+      {id:'V1', name:'MV KESTREL', meta:'367441220 · 11.8 kn', route:R.in, sp:0.70, start:0, ev:'CROSS'},
+      {id:'V2', name:'HANJIN AURORA', meta:'477889100 · 16.4 kn', route:R.out, sp:0.72, start:0, ev:'CROSS'},
+      {id:'V5', name:'HARBOUR FERRY 3', meta:'366100440 · 22.0 kn', route:R.fer, sp:0.85, start:0, ev:'OTHER'},
+      {id:'V4', name:'FV MARIA T', meta:'tentative · 3 plots', route:R.sb, sp:0.42, start:120, tent:true, ev:'OTHER'},
+      {id:'V7', name:'MV COLUMBIA', meta:'316045990 · 12.6 kn', route:R.nb, sp:0.58, start:0, ev:'OTHER'},
+      {id:'V13', name:'MV ATLAS BAY', meta:'538007710 · 15.1 kn', route:R.gg2, sp:0.63, start:30, ev:'CROSS'},
+      {id:'V9', name:'TUG RAVEN', meta:'366774310 · 7.4 kn', route:R.tug, sp:0.5, start:0, ev:'OTHER'},
+      {id:'V8', name:'MSC LUMEN', meta:'255806040 · 18.9 kn', route:R.sbx, sp:0.74, start:150, ev:'OTHER'},
+      {id:'V11', name:'FV BLUE HERON', meta:'tentative · 4 plots', route:R.fis, sp:0.38, start:60, tent:true, ev:'OTHER'}
+    ],
+    switches:[305,318,341,470,690,806],
+    alerts:[
+      [330,'CPA 240 m · KESTREL / AURORA · identity at risk'],
+      [352,'naive association committed both plots to t_01']
+    ],
+    sentences:[
+      ['KESTREL and AURORA passed with a closest approach of 240 m at 14:05:30Z, inside a single 30 s revisit.','CROSS'],
+      ['Under naive nearest-neighbour association the converged track claimed its neighbour\u2019s plot and identity swapped.','CROSS'],
+      ['Global assignment kept both identities across the crossing on this seed; pooled over 800 seeds, naive switches about 5× as often.','CROSS'],
+      ['No vessel entered a protected area during this replay window.','OTHER']
+    ],
+    footer:'Ratio, not absence of failure, is the honest claim.'
+  },
+  cable: {
+    label:'CABLE CORRIDOR', dot:'#8b7ce8',
+    vessels:[
+      {id:'V6', name:'MV ANTARES', meta:'249771030 · 4.1 kn', route:R.cab, sp:0.34, start:0, ev:'V3', dark:{at:420, reacq:640, prob:'p = 0.64', unk:'UNK-11'}},
+      {id:'V1', name:'MV KESTREL', meta:'367441220 · 11.8 kn', route:R.in, sp:0.70, start:60, ev:'CROSS'},
+      {id:'V5', name:'HARBOUR FERRY 3', meta:'366100440 · 22.0 kn', route:R.fer, sp:0.85, start:0, ev:'OTHER'},
+      {id:'V10', name:'PATROL 12', meta:'368091700 · 24.5 kn', route:R.pat, sp:0.95, start:20, ev:'OTHER'},
+      {id:'V12', name:'RV SEAWATCH', meta:'tentative · 2 plots', route:R.oc, sp:0.46, start:0, tent:true, ev:'OTHER'},
+      {id:'V8', name:'MSC LUMEN', meta:'255806040 · 18.9 kn', route:R.sbx, sp:0.74, start:90, ev:'OTHER'},
+      {id:'V7', name:'MV COLUMBIA', meta:'316045990 · 12.6 kn', route:R.nb, sp:0.58, start:180, ev:'OTHER'},
+      {id:'V9', name:'TUG RAVEN', meta:'366774310 · 7.4 kn', route:R.tug, sp:0.5, start:0, ev:'OTHER'}
+    ],
+    switches:[240,455,610,780],
+    alerts:[
+      [268,'MV ANTARES loitering 6 min over submarine cable corridor'],
+      [420,'MV ANTARES went dark over cable corridor'],
+      [640,'unlabelled contact UNK-11 inside t_01 coast region'],
+      [686,'re-attribution UNK-11 → MV ANTARES · p = 0.64 (weak)']
+    ],
+    sentences:[
+      ['MV ANTARES held 4.1 kn along the submarine cable corridor for 6 minutes before transmission stopped.','V3'],
+      ['The coast region reached 2.4 km before a plot arrived — near the 1197 m assignable-sigma ceiling at the default false-alarm rate.','ELLIPSE'],
+      ['UNK-11 re-attributes at p = 0.64 only; a second hypothesis at p = 0.31 remains open and is not dismissible.','LINK'],
+      ['Contact UNK-11 was first seen 2.6 nm west of the last confirmed position.','CONTACT']
+    ],
+    footer:'Weak attribution. Recommend holding both hypotheses.'
+  }
+};
+
+class Component extends DCLogic {
+  state = { key:null, t:0, playing:true, speed:10, mode:'mht', brief:false, focus:null,
+            place:HOME, msg:'', msgKind:'ok', v:0 };
+
+  // ---------- map ----------
+  boot(){
+    if(this.iv) return;
+    const s0 = this.props.startScenario;
+    if(s0 && SCEN[s0]) this.state = Object.assign({}, this.state, {key:s0});
+    this.last = Date.now();
+    if(!this.keys){
+      this.keys = e => {
+        const tag = (e.target && e.target.tagName) || '';
+        if(tag === 'INPUT' || tag === 'TEXTAREA' || !this.state.key) return;
+        if(e.code === 'Space'){ e.preventDefault(); this.setState(s => s.t >= DUR ? {t:0, playing:true} : {playing:!s.playing}); }
+        else if(e.key === 'ArrowRight'){ e.preventDefault(); this.setState(s => ({t: Math.min(DUR, s.t+10)})); }
+        else if(e.key === 'ArrowLeft'){ e.preventDefault(); this.setState(s => ({t: Math.max(0, s.t-10)})); }
+        else if(e.key === 'm' || e.key === 'M'){ this.setState(s => ({mode: s.mode === 'mht' ? 'naive' : 'mht'})); }
+      };
+      window.addEventListener('keydown', this.keys);
+    }
+    this.iv = setInterval(() => {
+      const now = Date.now(), dt = Math.min(2, (now-this.last)/1000);
+      this.last = now;
+      if(!this.state.playing || !this.state.key) return;
+      this.setState(s => { const t = s.t + dt*s.speed; return t >= DUR ? {t:DUR, playing:false} : {t}; });
+    }, 120);
+  }
+  mountMap(el){
+    if(!el || this.mapEl === el) return;
+    this.mapEl = el;
+    const go = () => {
+      if(!window.L){ setTimeout(go, 120); return; }
+      const m = window.L.map(el, { zoomControl:false, attributionControl:true, preferCanvas:true })
+        .setView([HOME.lat, HOME.lng], HOME.zoom);
+      window.L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        maxZoom:18, subdomains:'abcd',
+        attribution:'© OpenStreetMap · © CARTO'
+      }).addTo(m);
+      window.L.control.zoom({position:'bottomright'}).addTo(m);
+      m.on('move zoom resize', () => this.setState(s => ({v:s.v+1})));
+      this.map = m;
+      setTimeout(() => { m.invalidateSize(); this.fit(); }, 60);
+    };
+    go();
+  }
+  offset(){
+    const p = this.state.place;
+    return { dLat: p.lat - HOME.lat, dLng: p.lng - HOME.lng };
+  }
+  ll(x, y){
+    const o = this.offset();
+    return [ LAT0 - y/K + o.dLat, LON0 + x/(COSLAT*K) + o.dLng ];
+  }
+  pr(x, y){
+    if(!this.map) return {x:-9999, y:-9999};
+    const p = this.map.latLngToContainerPoint(this.ll(x, y));
+    return {x:p.x, y:p.y};
+  }
+  poly(pts){ return pts.map(p => { const q = this.pr(p[0], p[1]); return q.x.toFixed(1)+','+q.y.toFixed(1); }).join(' '); }
+  fit(){
+    if(!this.map || !this.mapEl || !this.mapEl.clientWidth) return;
+    const a = this.ll(60,150), b = this.ll(980,900);
+    if(![a[0],a[1],b[0],b[1]].every(n => typeof n === 'number' && isFinite(n))) return;
+    try {
+      this.map.invalidateSize(false);
+      const w = this.mapEl.clientWidth, h = this.mapEl.clientHeight;
+      const tl = [Math.min(300, w*0.24), Math.min(150, h*0.20)];
+      const br = [Math.min(150, w*0.12), Math.min(120, h*0.18)];
+      this.map.fitBounds([[a[0],a[1]],[b[0],b[1]]],
+        { paddingTopLeft:tl, paddingBottomRight:br, animate:false });
+    } catch(err){ console.warn('fit failed', err && err.message, a, b); }
+  }
+  pxPerMetre(){
+    if(!this.map) return 0.02;
+    const a = this.map.getCenter(), b = [a.lat, a.lng + 0.01];
+    const dpx = this.map.latLngToContainerPoint(b).x - this.map.latLngToContainerPoint([a.lat, a.lng]).x;
+    const d = this.map.distance([a.lat, a.lng], b);
+    return d ? Math.abs(dpx/d) : 0.02;
+  }
+  search(){
+    const q = (this.input && this.input.value || '').trim();
+    if(!q) return;
+    this.setState({msg:'LOCATING…', msgKind:'wait'});
+    fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q))
+      .then(r => r.json())
+      .then(d => {
+        if(!d || !d.length){ this.setState({msg:'NO MATCH', msgKind:'err'}); return; }
+        const hit = d[0], name = (hit.display_name || q).split(',').slice(0,2).join(',').toUpperCase();
+        this.setState({ place:{name, lat:parseFloat(hit.lat), lng:parseFloat(hit.lon)}, msg:'RELOCATED', msgKind:'ok' },
+          () => { this.fit(); });
+      })
+      .catch(() => this.setState({msg:'GEOCODER UNREACHABLE', msgKind:'err'}));
+  }
+
+  events(key, zone){
+    if(this.evCache && this.evCache.k === key + zone) return this.evCache.v;
+    const sc = SCEN[key], rnd = lcg(key.length*9173+41), out = [];
+    for(let t=6; t<DUR; t+=11){
+      const f = 400 + Math.round(t*2.1), c = 30 + Math.floor(rnd()*14), k = c + Math.floor(rnd()*4);
+      out.push({t, kind:'r', text:'frame '+f+' · '+c+' contacts → '+k+' tracks'});
+    }
+    let h = 4;
+    for(let t=48; t<DUR; t+=61){
+      h++;
+      const p = (0.52 + rnd()*0.3).toFixed(2), id = 'h_'+String(h).padStart(2,'0');
+      out.push({t, kind:'b', text: rnd() > 0.42
+        ? 'hypothesis split '+id+' → '+id+'a ('+p+') / '+id+'b ('+(1-p).toFixed(2)+')'
+        : 'hypothesis merge '+id+'a + '+id+'b → '+id+' ('+p+')'});
+    }
+    sc.alerts.forEach(a => out.push({t:a[0], kind:'a', text:a[1].split('{Z}').join(zone)}));
+    out.sort((x,y) => x.t - y.t);
+    this.evCache = {k:key+zone, v:out};
+    return out;
+  }
+  clockAt(t){
+    const s = Math.floor(14*3600 + 2*60 + t), p = n => String(n).padStart(2,'0');
+    return p(Math.floor(s/3600)%24)+':'+p(Math.floor(s/60)%60)+':'+p(s%60);
+  }
+
+  renderVals(){
+    this.boot();
+    const st = this.state, key = st.key, sc = key ? SCEN[key] : null, t = st.t;
+    const naive = st.mode === 'naive', focus = st.focus;
+    const op = ev => (focus && focus !== ev) ? 0.09 : 1;
+    const place = st.place;
+    const zoneName = place.name === HOME.name ? 'Monterey Bay NMS' : place.name.split(',')[0] + ' MARINE PROTECTED AREA';
+    const ppm = this.pxPerMetre();
+
+    const scenarios = Object.keys(SCEN).map(k => {
+      const on = k === key;
+      return { label:SCEN[k].label, dot: on ? SCEN[k].dot : '#3a464e',
+        bg: on ? '#12212a' : 'transparent', bd: on ? '#2f6d7a' : '#232e36', fg: on ? '#dbe5ea' : '#7d8d96',
+        click: () => { this.evCache = null; this.setState({key:k, t:0, playing:true, focus:null, brief:false}, () => this.fit()); } };
+    });
+    const speeds = [1,10,60].map(v => ({
+      label:v+'×', bg: st.speed===v ? '#dbe5ea' : '#131b21', fg: st.speed===v ? '#0a1013' : '#8fa0aa',
+      bd: st.speed===v ? '#dbe5ea' : '#2a353d', click: () => this.setState({speed:v})
+    }));
+
+    // geofences (always drawn, they define the AO)
+    const zones = ZONES.map(z => {
+      const l = this.pr(z.lx, z.ly);
+      return { pts:this.poly(z.pts), fill:z.fill, stroke:z.stroke, text:z.text, sub2:z.sub2,
+        name: (z.key === 'nms' ? zoneName : z.name).toUpperCase(), sub:z.sub,
+        lx:l.x.toFixed(1), ly:l.y.toFixed(1), ly2:(l.y+17).toFixed(1) };
+    });
+    const a = this.pr(300, 330), b = this.pr(174, 430);
+    const rot = Math.atan2(b.y-a.y, b.x-a.x)*180/Math.PI;
+    const corridors = [{ pts:this.poly(CORRIDOR.pts), name:CORRIDOR.name,
+      lx:a.x.toFixed(1), ly:(a.y-8).toFixed(1), tf:'rotate('+rot.toFixed(1)+' '+a.x.toFixed(1)+' '+(a.y-8).toFixed(1)+')' }];
+
+    // scale bar
+    const nmOpts = [1,2,5,10,20,50];
+    let nm = 5;
+    for(const n of nmOpts){ if(n*1852*ppm >= 90){ nm = n; break; } }
+    const barPx = Math.min(300, nm*1852*ppm);
+    const h = (this.mapEl ? this.mapEl.clientHeight : 600);
+
+    const base = {
+      mapRef: el => this.mountMap(el),
+      inputRef: el => { this.input = el; },
+      onSearchKey: e => { if(e.key === 'Enter') this.search(); },
+      doSearch: () => this.search(),
+      aoOpen: !!st.aoOpen, aoCaret: st.aoOpen ? '▴ CLOSE' : '▾ RELOCATE',
+      toggleAO: () => this.setState(s => ({aoOpen:!s.aoOpen})),
+      placeName: place.name, placeCoords: place.lat.toFixed(3)+'° / '+place.lng.toFixed(3)+'°',
+      searchMsg: st.msg, searchColor: st.msgKind === 'err' ? '#ff8c7f' : st.msgKind === 'wait' ? '#ffc44d' : '#4f5d66',
+      zones, corridors,
+      scaleY: h-46, scaleY1: h-52, scaleY2: h-40, scaleTY: h-58, scaleX: (20+barPx).toFixed(0), scaleLabel: nm+' NM',
+      empty: !sc, legend: this.props.showLegend !== false && !!sc, baseOp: sc ? 1 : 0.4,
+      clock: sc ? this.clockAt(t) : '--:--:--',
+      progress: (sc ? t/DUR*100 : 0).toFixed(2)+'%',
+      elapsed: sc ? (String(Math.floor(t/60)).padStart(2,'0')+':'+String(Math.floor(t%60)).padStart(2,'0')) : '00:00',
+      playIcon: t >= DUR ? '↻' : (st.playing ? '❚❚' : '▶'),
+      togglePlay: () => this.setState(s => s.t >= DUR ? {t:0, playing:true} : {playing:!s.playing}),
+      refit: () => this.fit(),
+      scrub: e => {
+        const el = e.currentTarget;
+        const set = ev => { const r = el.getBoundingClientRect();
+          this.setState({t: Math.max(0, Math.min(1, (ev.clientX-r.left)/r.width))*DUR}); };
+        set(e);
+        const move = ev => set(ev);
+        const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+        window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+      },
+      speeds, scenarios,
+      setNaive: () => this.setState({mode:'naive'}), setMht: () => this.setState({mode:'mht'}),
+      naiveBg: naive ? '#ff4d3d' : 'transparent', naiveFg: naive ? '#160403' : '#6d7c85',
+      mhtBg: naive ? 'transparent' : '#5ec8d8', mhtFg: naive ? '#6d7c85' : '#06171b',
+      modeColor: naive ? '#ff4d3d' : '#5ec8d8',
+      modeTag: naive ? 'NAIVE NEAREST-NEIGHBOUR' : 'MHT · GLOBAL ASSIGNMENT',
+      toggleBrief: () => this.setState(s => ({brief:!s.brief, focus: s.brief ? null : s.focus})),
+      briefBtn: st.brief ? 'HIDE BRIEF' : 'INTEL BRIEF',
+      brief: st.brief && !!sc, focusOn: !!focus, clearFocus: () => this.setState({focus:null}),
+      briefModel:'kinematic-summary v3',
+      tracks:[], ellipses:[], contacts:[], links:[], logs:[], marks:[], sentences:[],
+      logCount: sc ? '' : '0', alertActive:false, alertText:'', alertTime:'',
+      idSwitches: sc ? 0 : '—', switchColor:'#3a464e', switchLabel:'#5a6a73', briefFooter:'',
+      metrics:[ {label:'ACTIVE TRACKS', value:'—'}, {label:'OPEN HYPOTH.', value:'—'},
+                {label:'LLM CALLS', value:'—'}, {label:'COST', value:'—'} ]
+    };
+    if(!sc || !this.map) return base;
+
+    const tracks = [], ellipses = [], contacts = [], links = [];
+    let visible = 0, darkNow = 0;
+    sc.vessels.forEach(v => {
+      if(t < v.start) return;
+      visible++;
+      const d = (t-v.start)*v.sp, g = at(v.route, d), p = this.pr(g.x, g.y);
+      const g2 = at(v.route, d+6), p2 = this.pr(g2.x, g2.y);
+      const hdg = Math.atan2(p2.x-p.x, -(p2.y-p.y))*180/Math.PI;
+      const dk = v.dark, isDark = dk && t >= dk.at && t < dk.reacq+60, resolved = dk && t >= dk.reacq+45;
+      const dark = isDark && !resolved;
+      const color = dark ? C.amber : (v.tent ? C.dim : C.cyan);
+      const tail = [], head = [];
+      const step = Math.max(6, d/70);
+      for(let s=0; s<=d; s+=step){ const q = at(v.route, s), r = this.pr(q.x, q.y); tail.push(r.x.toFixed(1)+','+r.y.toFixed(1)); }
+      { const r = this.pr(g.x, g.y); tail.push(r.x.toFixed(1)+','+r.y.toFixed(1)); }
+      for(let s=0; s<=42; s+=7){ const q = at(v.route, d-s), r = this.pr(q.x, q.y); head.push(r.x.toFixed(1)+','+r.y.toFixed(1)); }
+      tracks.push({
+        op:op(v.ev), color, fill: (v.tent || dark) ? 'none' : color, sw: v.tent ? 1.6 : 2,
+        dash: dark ? '4 3' : 'none', tail:tail.join(' '), head:head.join(' '),
+        tf:'translate('+p.x.toFixed(1)+','+p.y.toFixed(1)+') rotate('+hdg.toFixed(1)+')',
+        lx:(p.x+14).toFixed(1), ly:(p.y-3).toFixed(1), ly2:(p.y+12).toFixed(1),
+        name:v.name, meta: dark ? 'COASTING · NO AIS' : v.meta, sub: dark ? '#c98f28' : '#7c8f99'
+      });
+      if(dark){
+        const age = t-dk.at, rm = 140 + age*8.2, r = Math.max(26, rm*ppm);
+        ellipses.push({
+          op:op('ELLIPSE'), x:p.x.toFixed(1), y:p.y.toFixed(1),
+          rx:(r*1.25).toFixed(1), ry:r.toFixed(1), rx2:(r*0.6).toFixed(1), ry2:(r*0.48).toFixed(1),
+          cross:'M'+(p.x-11).toFixed(1)+' '+p.y.toFixed(1)+' h22 M'+p.x.toFixed(1)+' '+(p.y-11).toFixed(1)+' v22',
+          tx:(p.x-r*1.25).toFixed(1), ty:(p.y-r-26).toFixed(1), ty2:(p.y-r-8).toFixed(1),
+          label:'±'+(rm/1000).toFixed(2)+' km 95%',
+          sub:'DARK '+Math.floor(age/60)+'m '+String(Math.floor(age%60)).padStart(2,'0')+'s'
+        });
+        darkNow++;
+        if(t >= dk.reacq){
+          const gc = at(v.route, d+26), pc = this.pr(gc.x, gc.y), cx = pc.x+14, cy = pc.y+10;
+          contacts.push({ op:op('CONTACT'), x:(cx-6.5).toFixed(1), y:(cy-6.5).toFixed(1),
+            tf:'rotate(45 '+cx.toFixed(1)+' '+cy.toFixed(1)+')', cx:cx.toFixed(1), cy:cy.toFixed(1),
+            lx:(cx+15).toFixed(1), ly:(cy+4).toFixed(1), label:dk.unk+' · UNLABELLED' });
+          if(t >= dk.reacq+18){
+            links.push({ op:op('LINK'), x1:p.x.toFixed(1), y1:p.y.toFixed(1), x2:cx.toFixed(1), y2:cy.toFixed(1),
+              bx:((p.x+cx)/2-52).toFixed(1), by:((p.y+cy)/2-40).toFixed(1),
+              tx:((p.x+cx)/2-38).toFixed(1), ty:((p.y+cy)/2-20).toFixed(1), label:dk.prob });
+          }
+        }
+      }
+    });
+    (this.props.clutterContacts === false ? [] : [[790,430,60,'UNK-02'],[300,700,220,'UNK-04'],[905,300,380,'UNK-09']]).forEach(c => {
+      if(t < c[2] || t > c[2]+300) return;
+      const q = this.pr(c[0], c[1]);
+      contacts.push({ op:op('OTHER')*0.75, x:(q.x-6.5).toFixed(1), y:(q.y-6.5).toFixed(1),
+        tf:'rotate(45 '+q.x.toFixed(1)+' '+q.y.toFixed(1)+')', cx:q.x.toFixed(1), cy:q.y.toFixed(1),
+        lx:(q.x+15).toFixed(1), ly:(q.y+4).toFixed(1), label:c[3] });
+    });
+
+    const all = this.events(key, zoneName), seen = all.filter(e => e.t <= t);
+    const logs = seen.slice().reverse().slice(0,40).map(e => ({
+      ts:this.clockAt(e.t), text: e.kind === 'a' ? e.text.toUpperCase() : e.text,
+      color: e.kind === 'a' ? '#ff8c7f' : e.kind === 'b' ? '#a89bf0' : '#66757e',
+      bg: e.kind === 'a' ? '#2a0c0a' : 'transparent', bar: e.kind === 'a' ? '6px' : '3px'
+    }));
+    const lastAlert = sc.alerts.filter(x => x[0] <= t).pop();
+    const alertActive = !!lastAlert && (t-lastAlert[0]) < 45;
+    const idSwitches = naive ? sc.switches.filter(x => x <= t).length : 0;
+    const hyp = naive ? 1 : 3 + darkNow*2 + (t > 280 && t < 400 ? 2 : 0);
+    const llm = 1 + Math.floor(t/260) + (st.brief ? 1 : 0);
+
+    return Object.assign(base, {
+      tracks, ellipses, contacts, links, logs, logCount: logs.length+' / '+seen.length,
+      alertActive, alertText: alertActive ? lastAlert[1].split('{Z}').join(zoneName).toUpperCase() : '',
+      alertTime: alertActive ? this.clockAt(lastAlert[0]) : '',
+      idSwitches, switchColor: idSwitches > 0 ? '#ff4d3d' : '#5ec8d8',
+      switchLabel: idSwitches > 0 ? '#ff8c7f' : '#5a6a73',
+      metrics:[ {label:'ACTIVE TRACKS', value:34+visible}, {label:'OPEN HYPOTH.', value:hyp},
+                {label:'LLM CALLS', value:llm}, {label:'COST', value:'$'+(llm*0.0142).toFixed(2)} ],
+      marks: sc.alerts.map(x => ({ left:(x[0]/DUR*100).toFixed(2)+'%', color: x[0] <= t ? '#ff4d3d' : '#4a2723' })),
+      sentences: sc.sentences.map(s => ({
+        text: s[0].split('{Z}').join(zoneName), mark: focus === s[1] ? '#5ec8d8' : '#2a353d',
+        bg: focus === s[1] ? '#12212a' : 'transparent', fg: focus === s[1] ? '#e6eef2' : '#9aa8b0',
+        click: () => this.setState(p => ({focus: p.focus === s[1] ? null : s[1]}))
+      })),
+      briefFooter: sc.footer
+    });
+  }
+}
+
+</script>
+</body>
+</html>
