@@ -14,3 +14,12 @@
 *.jac linguist-generated=false
 *.jac linguist-vendored=false
 *.jac linguist-documentation=false
+
+# Presentation/infra, not implementation-language code -- excluded from the
+# Python-vs-Jac stats the same way a project's markup/build scripts
+# normally would be, so the badge reflects the actual language choice this
+# repo is about.
+*.html linguist-documentation=true
+*.css linguist-documentation=true
+*.ps1 linguist-documentation=true
+*.sh linguist-documentation=true
