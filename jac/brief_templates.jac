@@ -611,3 +611,56 @@ def redaction_coverage_fraction(original: str, redacted: str) -> float {
     removed_chars_estimate = n_placeholders * (len(REDACTION_PLACEHOLDER) + 8);
     return min(1.0, removed_chars_estimate / max(1, len(original)));
 }
+
+
+# ---------------------------------------------------------------------------
+# Word-boundary redaction variant -- redact_terms() replaces exact
+# substrings, which can over-match inside an unrelated longer word (e.g.
+# a term "A" would match the "a" inside "vessel"). This variant only
+# replaces whole-word occurrences, using a simple manual scan rather than
+# a regex import, to keep this module's only dependency at "math"
+# (see the top-of-file import) for consistency with the rest of this
+# standalone family of modules.
+# ---------------------------------------------------------------------------
+
+def _is_word_char(ch: str) -> bool {
+    return ch.isalnum() or ch == "_";
+}
+
+
+def _word_boundary_match(text: str, term: str, start: int) -> bool {
+    """True if `term` occurs in `text` at index `start` as a whole word --
+    i.e. the character immediately before and after the match (if any) is
+    not itself a word character."""
+    end = start + len(term);
+    before_ok = start == 0 or not _is_word_char(text[start - 1]);
+    after_ok = end >= len(text) or not _is_word_char(text[end]);
+    return before_ok and after_ok;
+}
+
+
+def redact_terms_word_boundary(text: str, sensitive_terms: list) -> str {
+    """Whole-word-only counterpart to redact_terms() -- same
+    longest-term-first ordering, but skips a candidate match that is not
+    bounded by non-word characters on both sides."""
+    ordered = sorted(sensitive_terms, key=lambda t: object: -len(t));
+    result = text;
+    for term in ordered {
+        if not term {
+            continue;
+        }
+        out_chars = [];
+        i = 0;
+        while i < len(result) {
+            if result[i:i + len(term)] == term and _word_boundary_match(result, term, i) {
+                out_chars.append(REDACTION_PLACEHOLDER);
+                i += len(term);
+            } else {
+                out_chars.append(result[i]);
+                i += 1;
+            }
+        }
+        result = "".join(out_chars);
+    }
+    return result;
+}
