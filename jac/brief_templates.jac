@@ -664,3 +664,36 @@ def redact_terms_word_boundary(text: str, sensitive_terms: list) -> str {
     }
     return result;
 }
+
+
+def redaction_self_check_word_boundary_report() -> str {
+    """Hand-inspection report contrasting redact_terms() (substring) with
+    redact_terms_word_boundary() on a phrase engineered to show the
+    difference: "vessel A's identity is confirmed" contains the letter
+    sequence "A" both as the standalone term and inside no other word
+    here, so a second fixture with a deliberately embedded substring is
+    used instead to make the contrast visible."""
+    text = "the cat sat near category five, and a cat again";
+    naive = redact_terms(text, ["cat"]);
+    bounded = redact_terms_word_boundary(text, ["cat"]);
+    lines = ["=== word-boundary redaction contrast ==="];
+    lines.append(f"original: {text}");
+    lines.append(f"naive substring redaction:  {naive}");
+    lines.append(f"word-boundary redaction:    {bounded}");
+    return "\n".join(lines);
+}
+
+
+def full_self_check_report_v2() -> str {
+    """Superset of full_self_check_report() including the word-boundary
+    redaction contrast added after that function was first written."""
+    return "\n\n".join([
+        full_self_check_report(),
+        redaction_self_check_word_boundary_report(),
+    ]);
+}
+
+
+with entry:__main__ {
+    print(full_self_check_report_v2());
+}
