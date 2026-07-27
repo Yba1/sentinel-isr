@@ -828,3 +828,202 @@ def module_summary() -> dict {
         "locales": known_locales(),
     };
 }
+
+
+# ---------------------------------------------------------------------------
+# Confidence-tagged rendering -- pairs a register's text with a coarse
+# confidence label derived from how many justifications/antecedents back
+# the conclusion, independent of the pacing module's numeric confidence
+# field (that one comes from a caller; this one is derived purely from
+# the explanation's own shape).
+# ---------------------------------------------------------------------------
+
+glob CONFIDENCE_HIGH: str = "high";
+glob CONFIDENCE_MEDIUM: str = "medium";
+glob CONFIDENCE_LOW: str = "low";
+
+
+def derived_confidence_label(explanation: dict) -> str {
+    """A coarse confidence label from the explanation's own structure: IN
+    with multiple satisfied justifications is "high"; IN with exactly one
+    is "medium"; anything OUT is "low" (the conclusion currently has no
+    standing support at all, regardless of how many justifications exist
+    on paper)."""
+    status = explanation.get("status", "?");
+    if status != "IN" {
+        return CONFIDENCE_LOW;
+    }
+    satisfied_count = sum(
+        1 for j in explanation.get("justifications", []) if j.get("satisfied")
+    );
+    if satisfied_count >= 2 {
+        return CONFIDENCE_HIGH;
+    }
+    return CONFIDENCE_MEDIUM;
+}
+
+
+def confidence_tagged_brief(explanation: dict, register: str) -> dict {
+    """{"text": ..., "confidence": ...} -- the render plus its derived
+    confidence label, in one call."""
+    return {
+        "text": brief_in_register(explanation, register),
+        "confidence": derived_confidence_label(explanation),
+    };
+}
+
+
+def confidence_tagged_panel(explanations: list, register: str) -> list {
+    out = [];
+    for explanation in explanations {
+        tagged = confidence_tagged_brief(explanation, register);
+        out.append({
+            "concl_id": explanation.get("concl_id", "?"),
+            "register": register,
+            "text": tagged["text"],
+            "confidence": tagged["confidence"],
+            "status": explanation.get("status", "?"),
+        });
+    }
+    return out;
+}
+
+
+def confidence_distribution(explanations: list) -> dict {
+    """Count of each derived_confidence_label() value across a list of
+    explanations -- a quick "how solid is this whole panel" summary
+    number, zero-filled for labels that do not appear rather than omitted,
+    so a caller can always index all three keys without a KeyError."""
+    counts = {CONFIDENCE_HIGH: 0, CONFIDENCE_MEDIUM: 0, CONFIDENCE_LOW: 0};
+    for explanation in explanations {
+        label = derived_confidence_label(explanation);
+        counts[label] = counts.get(label, 0) + 1;
+    }
+    return counts;
+}
+
+
+def confidence_distribution_report(explanations: list) -> str {
+    counts = confidence_distribution(explanations);
+    total = sum(counts.values());
+    lines = ["=== confidence distribution ==="];
+    for label in [CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, CONFIDENCE_LOW] {
+        n = counts.get(label, 0);
+        pct = 100.0 * n / total if total > 0 else 0.0;
+        lines.append(f"{label}: {n}/{total} ({pct:.0f}%)");
+    }
+    return "\n".join(lines);
+}
+
+
+def confidence_self_check_report() -> str {
+    """Hand-inspection report for the confidence-tagging layer."""
+    in_expl = _synthetic_in_explanation();
+    out_expl = _synthetic_out_explanation();
+    both = [in_expl, out_expl];
+
+    lines = ["=== brief_templates.jac confidence self-check ==="];
+    lines.append(f"in_expl derived confidence: {derived_confidence_label(in_expl)} (expected medium)");
+    lines.append(f"out_expl derived confidence: {derived_confidence_label(out_expl)} (expected low)");
+    lines.append(confidence_distribution_report(both));
+    return "\n".join(lines);
+}
+
+
+# ---------------------------------------------------------------------------
+# Trend tracking across repeated calls -- a standalone, in-memory history
+# of confidence_distribution() snapshots over time, for a hypothetical
+# "is this investigation's evidence base getting stronger or weaker"
+# dashboard widget. Purely additive bookkeeping; nothing in this repo
+# calls record_confidence_snapshot() today.
+# ---------------------------------------------------------------------------
+
+glob CONFIDENCE_HISTORY: list = [];
+glob CONFIDENCE_HISTORY_CAP: int = 500;
+
+
+def record_confidence_snapshot(explanations: list, label: str = "") -> dict {
+    """Append one confidence_distribution() reading to CONFIDENCE_HISTORY,
+    tagged with an optional caller-supplied label (e.g. a frame index or
+    timestamp string -- this module has no clock of its own, matching the
+    "no Date.now()-equivalent inside a deterministic kernel" discipline
+    used elsewhere in this session's Jac modules). Caps history length at
+    CONFIDENCE_HISTORY_CAP, dropping the oldest entry first, so a
+    long-running process cannot grow this list without bound."""
+    snapshot = {
+        "label": label,
+        "distribution": confidence_distribution(explanations),
+    };
+    CONFIDENCE_HISTORY.append(snapshot);
+    if len(CONFIDENCE_HISTORY) > CONFIDENCE_HISTORY_CAP {
+        CONFIDENCE_HISTORY.pop(0);
+    }
+    return snapshot;
+}
+
+
+def confidence_history() -> list {
+    return list(CONFIDENCE_HISTORY);
+}
+
+
+def reset_confidence_history() -> None {
+    """Clears CONFIDENCE_HISTORY -- essential for a fresh test/demo run,
+    same "process-local, rebuilt by reset()" discipline as jac/jtms.jac's
+    reset() and jac/hypothesis.jac's ROOTS."""
+    CONFIDENCE_HISTORY.clear();
+}
+
+
+def confidence_trend_direction(metric: str = CONFIDENCE_HIGH) -> str {
+    """"improving", "declining", or "flat", comparing the first and last
+    recorded snapshot's count for `metric` -- a crude two-point trend, not
+    a real regression fit. Returns "flat" if fewer than two snapshots
+    exist, since a trend needs at least two points."""
+    if len(CONFIDENCE_HISTORY) < 2 {
+        return "flat";
+    }
+    first = CONFIDENCE_HISTORY[0]["distribution"].get(metric, 0);
+    last = CONFIDENCE_HISTORY[-1]["distribution"].get(metric, 0);
+    if last > first {
+        return "improving";
+    }
+    if last < first {
+        return "declining";
+    }
+    return "flat";
+}
+
+
+def confidence_history_report() -> str {
+    """One line per recorded snapshot, plus a trend-direction summary for
+    the "high" confidence bucket."""
+    lines = ["=== confidence history ==="];
+    for snap in CONFIDENCE_HISTORY {
+        dist = snap["distribution"];
+        lines.append(
+            f"[{snap['label']}] high={dist.get(CONFIDENCE_HIGH, 0)} "
+            f"medium={dist.get(CONFIDENCE_MEDIUM, 0)} low={dist.get(CONFIDENCE_LOW, 0)}"
+        );
+    }
+    lines.append(f"trend (high confidence): {confidence_trend_direction(CONFIDENCE_HIGH)}");
+    if not CONFIDENCE_HISTORY {
+        lines.append("(no snapshots recorded)");
+    }
+    return "\n".join(lines);
+}
+
+
+def confidence_history_self_check_report() -> str {
+    """Hand-inspection report exercising the history-tracking layer with
+    three synthetic snapshots showing an improving trend."""
+    reset_confidence_history();
+    in_expl = _synthetic_in_explanation();
+    out_expl = _synthetic_out_explanation();
+
+    record_confidence_snapshot([out_expl, out_expl], label="t0");
+    record_confidence_snapshot([out_expl, in_expl], label="t1");
+    record_confidence_snapshot([in_expl, in_expl], label="t2");
+
+    return confidence_history_report();
+}
