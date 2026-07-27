@@ -30,7 +30,7 @@ import from jac.render { Renderer, frame_delta }
 """Materialise the graph for a pack and run the full pipeline. Returns the
 run record: deltas (one per frame), the mission node, and provenance of the
 associator that actually ran."""
-def run_pack(pack_id: str, max_frames: int = -1, seed_offset: int = 1) -> dict {
+def run_pack(pack_id: str, max_frames: int = -1, seed_offset: int = 1, assoc_mode: str = "global") -> dict {
     scenario = load_scenario(pack_id);
     engine = ReplayEngine(scenario);
     mission = build_mission(scenario);
@@ -44,22 +44,22 @@ def run_pack(pack_id: str, max_frames: int = -1, seed_offset: int = 1) -> dict {
         if max_frames >= 0 and frame.idx >= max_frames {
             break;
         }
-        deltas.append(run_frame(mission, scenario, frame));
+        deltas.append(run_frame(mission, scenario, frame, assoc_mode=assoc_mode));
     }
     return {
         "pack_id": scenario.pack_id,
         "deltas": deltas,
         "mission": mission,
         "scenario": scenario,
-        "assoc_source": assoc_provenance(),
+        "assoc_source": assoc_provenance(assoc_mode),
     };
 }
 
 
 """One tick of the product: exactly the walker sequence the WebSocket layer
 will drive. Zones ride along on frame 0 only."""
-def run_frame(mission: Mission, scenario: object, frame: object) -> dict {
-    (delta, _pairs) = run_frame_scored(mission, scenario, frame);
+def run_frame(mission: Mission, scenario: object, frame: object, assoc_mode: str = "global") -> dict {
+    (delta, _pairs) = run_frame_scored(mission, scenario, frame, assoc_mode=assoc_mode);
     return delta;
 }
 
@@ -68,12 +68,13 @@ def run_frame(mission: Mission, scenario: object, frame: object) -> dict {
 id-switch counter (tracker.metrics.TrackingMetrics). The pairs are read from
 ground truth for scoring only and never appear in the returned delta -- the
 web layer sends the frontend a scalar count, never an identity."""
-def run_frame_scored(mission: Mission, scenario: object, frame: object) -> tuple {
+def run_frame_scored(mission: Mission, scenario: object, frame: object, assoc_mode: str = "global") -> tuple {
     driver = ScenarioDriver(scenario=scenario, frame=frame) spawn mission;
     fusion = Fusion(
         t=frame.t,
         dt=scenario.frame_interval_s,
         meas=driver.effective,
+        assoc_mode=assoc_mode,
     ) spawn mission;
     for alert in fusion.new_alerts {
         AlertScribe() spawn alert;

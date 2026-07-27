@@ -53,7 +53,7 @@ L.tileLayer(
   { subdomains: "abcd", maxZoom: 19 }
 ).addTo(map);
 
-const zonesLayer = L.layerGroup().addTo(map);
+const zonesLayer = L.featureGroup().addTo(map);
 
 function drawZones(zones) {
   if (state.zonesDrawn) return;

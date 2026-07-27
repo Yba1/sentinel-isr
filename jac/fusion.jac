@@ -35,7 +35,7 @@ actually decides who may claim a detection.
 
 import from tracker.kalman { CVKalman }
 import from tracker.assoc {
-    Track as RTrack, AssocParams, associate_global, max_assignable_sigma,
+    Track as RTrack, AssocParams, associate_global, associate_greedy, max_assignable_sigma,
 }
 import from data.geometry { innovation_stats, reachable }
 import from jac.graph {
@@ -86,9 +86,10 @@ glob BIRTH_GATE_MPS: float = 15.0;
 """Provenance for the run summary: which associator ran, and the dark-vessel
 ceiling the chosen params imply. Printed rather than assumed so nobody demos a
 re-acquisition the numbers do not actually support."""
-def assoc_provenance() -> str {
+def assoc_provenance(mode: str = "global") -> str {
+    stage1 = "tracker.assoc (global, padded Hungarian)" if mode == "global" else "tracker.assoc (greedy nearest-neighbor -- naive baseline)";
     return (
-        f"tracker.assoc (global, padded Hungarian); reacq ceiling "
+        f"{stage1}; reacq ceiling "
         f"{max_assignable_sigma(REACQ_PARAMS)/1000.0:.0f} km, "
         f"reach gate {REACQ_MAX_SPEED_MPS:.0f} m/s"
     );
@@ -99,6 +100,12 @@ walker Fusion {
     has t: float = 0.0;
     has dt: float = 30.0;
     has meas: list = [];               # from ScenarioDriver.effective
+    # "global" (default) = padded Hungarian, stage 1 only. "greedy" swaps in
+    # tracker.assoc.associate_greedy for stage 1 -- the naive baseline the
+    # demo's ID-switch comparison is against. Stage 2 (dark-vessel reacq)
+    # always stays on the global solve; it is a different, separately tuned
+    # subsystem and the greedy toggle was never meant to touch it.
+    has assoc_mode: str = "global";
     # Outputs for the renderer / delta assembly:
     has new_alerts: list = [];
     has born: list = [];
@@ -180,7 +187,14 @@ walker Fusion {
         rts = [n._rt for n in nodes];
         zs = [[m.x, m.y] for m in meas];
         Rs = [m.R() for m in meas];
-        res = associate_global(rts, zs, Rs, params=params);
+        # Stage 2 (dark-vessel reacq, params is REACQ_PARAMS) always solves
+        # globally regardless of assoc_mode -- the toggle is a stage-1 naive
+        # baseline, not a change to the reacquisition subsystem.
+        if self.assoc_mode == "greedy" and params is MISSION_PARAMS {
+            res = associate_greedy(rts, zs, Rs, params=params);
+        } else {
+            res = associate_global(rts, zs, Rs, params=params);
+        }
 
         for (ti, mi) in res.assignments {
             trk = nodes[ti];

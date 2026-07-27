@@ -25,27 +25,54 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal .env loader (KEY=VALUE per line, '#' comments) so a real
+    aisstream.io key can be picked up without adding a new dependency.
+    Never overwrites a variable already set in the real environment."""
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+_load_dotenv(REPO_ROOT / ".env")
+
 import numpy as np
 from aiohttp import web, WSMsgType
 
 import jaclang  # noqa: F401  -- registers the .jac import hook
 
 from data.scenario import load_scenario
+from data.global_ais import GlobalAisFeed, global_snapshot
 from jac.graph import build_mission
 from jac.main import run_frame_scored
+from jac import jtms
+from jac.brief import panel_payload
+from jac.fusion import assoc_provenance as jac_main_assoc_source
 from tracker.metrics import TrackingMetrics
+from tracker import eval as tracker_eval
 
 HISTORY_CAP = 150  # log/alert lines sent on a sync; the rail is a scroller, not an archive
+
+# Real packs on disk, for the dashboard's scenario picker. Order matters --
+# this is display order, s01 (the headline dark-vessel demo) first.
+KNOWN_PACKS = ["s01_dark_in_sanctuary", "s02_synthetic_demo", "s02_mmsi_spoof", "s03_ghost_fleet"]
 
 
 # --------------------------------------------------------------------- precompute
 
-def precompute(pack_id: str, max_frames: int = -1) -> dict:
+def precompute(pack_id: str, max_frames: int = -1, assoc_mode: str = "global") -> dict:
     """Run the full Jac pipeline once and cache everything the server needs.
 
     Returns a dict with the per-frame delta cache plus flat, prefix-summed
     log/alert history so a seek can slice "everything up to here" in O(1)
-    lookup + O(k) slice, never by re-deriving it.
+    lookup + O(k) slice, never by re-deriving it. `assoc_mode` ("global" or
+    "greedy") selects the stage-1 associator -- see jac/fusion.jac.
     """
     scenario = load_scenario(pack_id)
     mission = build_mission(scenario)
@@ -63,7 +90,7 @@ def precompute(pack_id: str, max_frames: int = -1) -> dict:
     for frame in scenario.frames:
         if max_frames >= 0 and frame.idx >= max_frames:
             break
-        delta, pairs = run_frame_scored(mission, scenario, frame)
+        delta, pairs = run_frame_scored(mission, scenario, frame, assoc_mode=assoc_mode)
         metrics.update(pairs)
         delta["id_switches"] = metrics.id_switches
 
@@ -75,6 +102,7 @@ def precompute(pack_id: str, max_frames: int = -1) -> dict:
 
     return {
         "pack_id": scenario.pack_id,
+        "assoc_mode": assoc_mode,
         "frame_interval_s": scenario.frame_interval_s,
         "zones": frames[0]["zones"] if frames else [],
         "frames": frames,
@@ -84,6 +112,22 @@ def precompute(pack_id: str, max_frames: int = -1) -> dict:
         "alert_end": alert_end,
         "expected": scenario.expected,
     }
+
+
+# ------------------------------------------------------------------------ jtms
+
+def _jtms_state(flipped: list | None = None) -> dict:
+    """JSON-serialisable snapshot of the live MMSI-spoof JTMS demo graph
+    (jac/jtms.jac): every Fact's believed flag, every Conclusion's status and
+    a fresh brief_for() sentence, and (if this call followed a
+    retract/reinstate) which conclusion ids just flipped."""
+    facts = {fid: {"label": jtms.FACTS[fid].label, "believed": jtms.fact_believed(fid)}
+              for fid in jtms.fact_ids()}
+    concls = {cid: {"label": jtms.CONCLUSIONS[cid].label,
+                     "status": jtms.conclusion_status(cid),
+                     "brief": jtms.brief_for(cid)}
+               for cid in jtms.conclusion_ids()}
+    return {"facts": facts, "conclusions": concls, "flipped": flipped or []}
 
 
 def history_for(cache: dict, frame_idx: int) -> tuple[list[str], list[dict]]:
@@ -98,11 +142,16 @@ def history_for(cache: dict, frame_idx: int) -> tuple[list[str], list[dict]]:
 
 def build_app(cache: dict) -> web.Application:
     app = web.Application()
-    n = len(cache["frames"])
-    app["cache"] = cache
+    app["caches"] = {(cache["pack_id"], cache["assoc_mode"]): cache}
+    app["active_key"] = (cache["pack_id"], cache["assoc_mode"])
     app["state"] = {"frame_idx": 0, "playing": False, "speed": 10.0}
     app["clients"] = set()
-    app["n_frames"] = n
+
+    def active() -> dict:
+        return app["caches"][app["active_key"]]
+
+    def n_frames() -> int:
+        return len(active()["frames"])
 
     async def broadcast(message: dict) -> None:
         dead = set()
@@ -120,12 +169,18 @@ def build_app(cache: dict) -> web.Application:
         await broadcast({"type": "state", **app["state"]})
 
     async def broadcast_sync(frame_idx: int) -> None:
+        cache = active()
         log, alerts = history_for(cache, frame_idx)
         await broadcast({
             "type": "sync",
             **cache["frames"][frame_idx],
             "history_log": log,
             "history_alerts": alerts,
+            "pack_id": cache["pack_id"],
+            "assoc_mode": cache["assoc_mode"],
+            "assoc_source": jac_main_assoc_source(cache["assoc_mode"]),
+            "total_frames": len(cache["frames"]),
+            "zones": cache["zones"],
             **app["state"],
         })
 
@@ -134,10 +189,11 @@ def build_app(cache: dict) -> web.Application:
 
     async def player_loop(app: web.Application) -> None:
         state = app["state"]
-        interval_s = cache["frame_interval_s"]
         while True:
+            cache = active()
+            n = len(cache["frames"])
             if state["playing"] and state["frame_idx"] < n - 1:
-                await asyncio.sleep(interval_s / max(state["speed"], 1e-3))
+                await asyncio.sleep(cache["frame_interval_s"] / max(state["speed"], 1e-3))
                 if not state["playing"]:
                     continue  # paused mid-sleep
                 state["frame_idx"] += 1
@@ -158,26 +214,45 @@ def build_app(cache: dict) -> web.Application:
 
     app.on_startup.append(start_player)
 
+    api_key = os.environ.get("AISSTREAM_API_KEY", "")
+    app["global_feed"] = GlobalAisFeed(api_key) if api_key else None
+
+    async def start_global_feed(app: web.Application) -> None:
+        if app["global_feed"] is not None:
+            app["global_feed_task"] = asyncio.create_task(app["global_feed"].run())
+
+    async def stop_global_feed(app: web.Application) -> None:
+        task = app.get("global_feed_task")
+        if task is not None:
+            task.cancel()
+
+    app.on_startup.append(start_global_feed)
+    app.on_cleanup.append(stop_global_feed)
+
     # ------------------------------------------------------------------ REST
 
     async def api_scenario(request: web.Request) -> web.Response:
+        cache = active()
         return web.json_response({
             "pack_id": cache["pack_id"],
+            "assoc_mode": cache["assoc_mode"],
             "frame_interval_s": cache["frame_interval_s"],
-            "total_frames": n,
+            "total_frames": len(cache["frames"]),
             "zones": cache["zones"],
             "expected": cache["expected"],
+            "known_packs": KNOWN_PACKS,
+            "warm": [{"pack_id": k[0], "assoc_mode": k[1]} for k in app["caches"]],
         })
 
     async def api_state(request: web.Request) -> web.Response:
-        return web.json_response({"total_frames": n, **app["state"]})
+        return web.json_response({"total_frames": n_frames(), **app["state"]})
 
     async def api_play(request: web.Request) -> web.Response:
         body = await _body(request)
         state = app["state"]
         if "speed" in body:
             state["speed"] = max(float(body["speed"]), 0.1)
-        if state["frame_idx"] >= n - 1:
+        if state["frame_idx"] >= n_frames() - 1:
             state["frame_idx"] = 0  # replaying past the end restarts
         state["playing"] = True
         await app["broadcast_state"]()
@@ -196,7 +271,7 @@ def build_app(cache: dict) -> web.Application:
 
     async def api_seek(request: web.Request) -> web.Response:
         body = await _body(request)
-        frame = max(0, min(n - 1, int(body.get("frame", 0))))
+        frame = max(0, min(n_frames() - 1, int(body.get("frame", 0))))
         app["state"]["frame_idx"] = frame
         await app["broadcast_sync"](frame)
         return web.json_response(app["state"])
@@ -207,6 +282,112 @@ def build_app(cache: dict) -> web.Application:
         await app["broadcast_sync"](0)
         return web.json_response(app["state"])
 
+    async def api_switch(request: web.Request) -> web.Response:
+        """Switch the active scenario pack and/or association mode. Blocks
+        while the (pack_id, assoc_mode) combination is precomputed for the
+        first time -- there is no partial/streaming precompute -- then it is
+        cached for every later switch back. Real Jac pipeline run, same as
+        startup; s01's 326-vessel window can take a couple of minutes the
+        first time, this is not a demo shortcut."""
+        body = await _body(request)
+        cur_pack, cur_mode = app["active_key"]
+        pack_id = body.get("pack_id", cur_pack)
+        assoc_mode = body.get("assoc_mode", cur_mode)
+        if pack_id not in KNOWN_PACKS:
+            return web.json_response({"error": f"unknown pack_id: {pack_id}"}, status=400)
+        if assoc_mode not in ("global", "greedy"):
+            return web.json_response({"error": f"unknown assoc_mode: {assoc_mode}"}, status=400)
+        key = (pack_id, assoc_mode)
+        if key not in app["caches"]:
+            app["caches"][key] = precompute(pack_id, assoc_mode=assoc_mode)
+        app["active_key"] = key
+        app["state"]["frame_idx"] = 0
+        app["state"]["playing"] = False
+        cache = app["caches"][key]
+        await app["broadcast"]({
+            "type": "init",
+            "pack_id": cache["pack_id"],
+            "assoc_mode": cache["assoc_mode"],
+            "assoc_source": jac_main_assoc_source(cache["assoc_mode"]),
+            "frame_interval_s": cache["frame_interval_s"],
+            "total_frames": len(cache["frames"]),
+            "zones": cache["zones"],
+        })
+        await app["broadcast_sync"](0)
+        return web.json_response({"pack_id": pack_id, "assoc_mode": assoc_mode})
+
+    async def api_jtms_reset(request: web.Request) -> web.Response:
+        jtms.reset()
+        jtms.build_mmsi_spoof_demo()
+        flipped = jtms.propagate()
+        return web.json_response(_jtms_state(flipped))
+
+    async def api_jtms_retract(request: web.Request) -> web.Response:
+        body = await _body(request)
+        fact_id = body.get("fact_id", "")
+        if not jtms.fact_ids():
+            jtms.build_mmsi_spoof_demo()
+            jtms.propagate()
+        try:
+            flipped = jtms.retract(fact_id)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response(_jtms_state(flipped))
+
+    async def api_jtms_reinstate(request: web.Request) -> web.Response:
+        body = await _body(request)
+        fact_id = body.get("fact_id", "")
+        try:
+            flipped = jtms.reinstate(fact_id)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response(_jtms_state(flipped))
+
+    async def api_jtms_state(request: web.Request) -> web.Response:
+        if not jtms.fact_ids():
+            jtms.build_mmsi_spoof_demo()
+            jtms.propagate()
+        return web.json_response(_jtms_state())
+
+    async def api_brief(request: web.Request) -> web.Response:
+        if not jtms.conclusion_ids():
+            jtms.build_mmsi_spoof_demo()
+            jtms.propagate()
+        ids = request.query.get("concl_ids", "")
+        concl_ids = [c for c in ids.split(",") if c] or jtms.conclusion_ids()
+        use_llm = request.query.get("use_llm", "1") not in ("0", "false", "False")
+        payload = panel_payload(concl_ids, use_llm=use_llm)
+        return web.json_response({"briefs": payload})
+
+    async def api_eval(request: web.Request) -> web.Response:
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(None, tracker_eval.evaluate_all)
+        packs = [{
+            "pack_id": r.pack_id,
+            "name": r.name,
+            "passed": r.passed,
+            "failed": r.failed,
+            "skipped": r.skipped,
+            "marginal": r.marginal,
+            "ok": r.ok,
+            "checks": [
+                {"key": c.key, "outcome": c.outcome, "detail": c.detail, "marginal": c.marginal}
+                for c in r.checks
+            ],
+        } for r in results]
+        return web.json_response({
+            "packs": packs,
+            "totals": {
+                "passed": sum(p["passed"] for p in packs),
+                "failed": sum(p["failed"] for p in packs),
+                "skipped": sum(p["skipped"] for p in packs),
+            },
+        })
+
+    async def api_global(request: web.Request) -> web.Response:
+        return web.json_response(global_snapshot(app["global_feed"]))
+
+    app.router.add_get("/api/global", api_global)
     app.router.add_get("/api/scenario", api_scenario)
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/play", api_play)
@@ -214,6 +395,13 @@ def build_app(cache: dict) -> web.Application:
     app.router.add_post("/api/speed", api_speed)
     app.router.add_post("/api/seek", api_seek)
     app.router.add_post("/api/reset", api_reset)
+    app.router.add_post("/api/switch", api_switch)
+    app.router.add_post("/api/jtms/reset", api_jtms_reset)
+    app.router.add_post("/api/jtms/retract", api_jtms_retract)
+    app.router.add_post("/api/jtms/reinstate", api_jtms_reinstate)
+    app.router.add_get("/api/jtms/state", api_jtms_state)
+    app.router.add_get("/api/brief", api_brief)
+    app.router.add_get("/api/eval", api_eval)
 
     # -------------------------------------------------------------------- WS
 
@@ -221,13 +409,17 @@ def build_app(cache: dict) -> web.Application:
         ws = web.WebSocketResponse(heartbeat=20.0)
         await ws.prepare(request)
         app["clients"].add(ws)
+        cache = active()
 
         await ws.send_str(json.dumps({
             "type": "init",
             "pack_id": cache["pack_id"],
+            "assoc_mode": cache["assoc_mode"],
+            "assoc_source": jac_main_assoc_source(cache["assoc_mode"]),
             "frame_interval_s": cache["frame_interval_s"],
-            "total_frames": n,
+            "total_frames": len(cache["frames"]),
             "zones": cache["zones"],
+            "known_packs": KNOWN_PACKS,
         }))
         frame_idx = app["state"]["frame_idx"]
         log, alerts = history_for(cache, frame_idx)
@@ -236,6 +428,8 @@ def build_app(cache: dict) -> web.Application:
             **cache["frames"][frame_idx],
             "history_log": log,
             "history_alerts": alerts,
+            "pack_id": cache["pack_id"],
+            "assoc_mode": cache["assoc_mode"],
             **app["state"],
         }))
 
@@ -253,6 +447,7 @@ def build_app(cache: dict) -> web.Application:
 
     web_dir = Path(__file__).resolve().parent
     app.router.add_get("/", lambda r: web.FileResponse(web_dir / "index.html"))
+    app.router.add_get("/dashboard", lambda r: web.FileResponse(web_dir / "dashboard.html"))
     app.router.add_static("/", web_dir, show_index=False)
 
     return app
