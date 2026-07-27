@@ -697,3 +697,134 @@ def full_self_check_report_v2() -> str {
 with entry:__main__ {
     print(full_self_check_report_v2());
 }
+
+
+# ---------------------------------------------------------------------------
+# Batch multi-locale, multi-register rendering -- the full cross product,
+# for a hypothetical admin tool that wants to preview every combination at
+# once before picking a default. Still standalone; still nothing calls it.
+# ---------------------------------------------------------------------------
+
+def render_full_matrix(explanation: dict, locales: list = None) -> dict {
+    """{locale: {register: text}} for every known locale (or the supplied
+    `locales` list) and every register in ALL_REGISTERS. The command and
+    public registers are rendered via their localized variants; the
+    operator register has no localized variant (see the module docstring:
+    it is meant to be precise, internal-facing console language, not
+    something translated for an audience), so it is rendered once and
+    repeated under every locale key for a consistent matrix shape."""
+    locs = locales if locales else known_locales();
+    matrix = {};
+    operator_text = operator_brief(explanation);
+    for locale in locs {
+        matrix[locale] = {
+            REGISTER_OPERATOR: operator_text,
+            REGISTER_COMMAND: command_brief_localized(explanation, locale=locale),
+            REGISTER_PUBLIC: public_brief_localized(explanation, locale=locale),
+        };
+    }
+    return matrix;
+}
+
+
+def render_full_matrix_report(explanation: dict, locales: list = None) -> str {
+    """Human-readable rendering of render_full_matrix()'s output --
+    locale, then register, then text, nested and indented for readability
+    in a terminal self-check."""
+    matrix = render_full_matrix(explanation, locales=locales);
+    lines = [f"=== full matrix for {explanation.get('concl_id', '?')} ==="];
+    for locale in sorted(matrix.keys()) {
+        lines.append(f"locale={locale}:");
+        for register in ALL_REGISTERS {
+            lines.append(f"  [{register}] {matrix[locale][register]}");
+        }
+    }
+    return "\n".join(lines);
+}
+
+
+def matrix_cell_count(explanation: dict, locales: list = None) -> int {
+    """Total number of (locale, register) cells render_full_matrix() would
+    produce -- a cheap sizing check before rendering a potentially large
+    matrix for many locales."""
+    locs = locales if locales else known_locales();
+    return len(locs) * len(ALL_REGISTERS);
+}
+
+
+# ---------------------------------------------------------------------------
+# Consistency checker -- verifies every registered locale actually differs
+# from no locale at all in at least one register (a sanity check that
+# would catch a copy-pasted locale registration that never got its
+# phrases actually translated, which is exactly what this module's only
+# non-"en" locale currently is -- see the self-check functions above,
+# which register "en-GB" with identical phrases on purpose to exercise
+# register_locale()'s validation, not to claim a real translation exists).
+# ---------------------------------------------------------------------------
+
+def locale_is_distinct_from(locale_a: str, locale_b: str) -> bool {
+    """True if any phrase key differs in text between two registered
+    locales. Raises KeyError implicitly (via dict indexing) if either
+    locale is unregistered -- callers are expected to check
+    known_locales() first, matching this module's "raise, don't guess"
+    discipline elsewhere."""
+    table_a = PHRASE_TABLE[locale_a];
+    table_b = PHRASE_TABLE[locale_b];
+    for key in table_a {
+        if table_a.get(key) != table_b.get(key) {
+            return True;
+        }
+    }
+    return False;
+}
+
+
+def identical_locale_pairs() -> list {
+    """Every (locale_a, locale_b) pair among known_locales() whose phrase
+    tables are byte-for-byte identical -- a "this locale was registered
+    but never actually translated" detector, flagging exactly the
+    "en-GB == en" situation the self-check functions above create on
+    purpose."""
+    locs = known_locales();
+    pairs = [];
+    for i in range(len(locs)) {
+        for j in range(i + 1, len(locs)) {
+            a = locs[i];
+            b = locs[j];
+            if not locale_is_distinct_from(a, b) {
+                pairs.append((a, b));
+            }
+        }
+    }
+    return pairs;
+}
+
+
+def locale_consistency_report() -> str {
+    """Reports every identical_locale_pairs() finding -- a warning-style
+    report, not an error, since a caller may deliberately want an alias
+    locale (e.g. "en-US" as a synonym for "en") rather than a real
+    translation."""
+    pairs = identical_locale_pairs();
+    lines = ["=== locale consistency report ==="];
+    if not pairs {
+        lines.append("no identical locale pairs found");
+    }
+    for (a, b) in pairs {
+        lines.append(f"'{a}' and '{b}' have byte-identical phrase tables (untranslated alias?)");
+    }
+    return "\n".join(lines);
+}
+
+
+def module_summary() -> dict {
+    """Static metadata about this module, matching jac/classifier.jac's
+    module_info() convention -- version, wiring status, and a count of how
+    many self-check report functions this file defines."""
+    return {
+        "version": "0.2.0-unwired",
+        "wired_into_pipeline": False,
+        "registers": ALL_REGISTERS,
+        "locales": known_locales(),
+    };
+}
