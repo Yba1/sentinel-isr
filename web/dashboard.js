@@ -9,7 +9,11 @@
 
 const TRAIL_LEN = 20;
 const MAX_LOG_LINES = 400;
-const GLOBAL_ZOOM_THRESHOLD = 6; // below this zoom, show the global layer instead of local tracks
+const MIN_ZOOM_FOR_MARKERS = 4;   // below this, don't even try to draw individual vessels
+const MAX_RENDERED_GLOBAL = 600;  // hard cap on markers actually drawn, regardless of how many are in view
+const MAX_RENDERED_DARK = 300;
+const GLOBAL_POLL_MS = 5000;
+const DARK_POLL_MS = 15000;
 
 const els = {
   map: document.getElementById("map"),
@@ -29,6 +33,13 @@ const els = {
   btnRetract: document.getElementById("btn-retract"),
   btnGlobalLayer: document.getElementById("btn-global-layer"),
   globalBadge: document.getElementById("global-badge"),
+  hypPanel: document.getElementById("hypothesis-panel"),
+  hypTitle: document.getElementById("hyp-title"),
+  hypClose: document.getElementById("hyp-close"),
+  hypMeta: document.getElementById("hyp-meta"),
+  hypLegend: document.getElementById("hyp-legend"),
+  zoomHint: document.getElementById("zoom-hint"),
+  replayControls: document.getElementById("replay-controls"),
   banner: document.getElementById("banner"),
   briefList: document.getElementById("brief-list"),
   jtmsFacts: document.getElementById("jtms-facts"),
@@ -48,8 +59,10 @@ const state = {
   zonesDrawn: false,
   assocMode: "global",
   packId: null,
-  globalLayerOn: false,
-  globalLive: false, // true once a real aisstream.io fix has arrived
+  globalLayerOn: true,  // LIVE is the default mode; replay is opt-in
+  globalLive: false,    // true once a real live position report has arrived
+  lastGlobalVessels: [], // raw list from the last successful /api/global poll
+  lastDarkVessels: [],   // raw list from the last successful /api/global/dark poll
 };
 
 const tracks = new Map(); // track_id -> { marker, trailGroup, ellipseLayer, positions, color }
@@ -61,6 +74,7 @@ const map = L.map(els.map, {
   zoomControl: true,
   attributionControl: false,
   worldCopyJump: true,
+  preferCanvas: true, // thousands of vessel dots as DOM nodes is what was lagging the whole page
 }).setView([20, 0], 3);
 
 L.tileLayer(
@@ -70,9 +84,40 @@ L.tileLayer(
   { subdomains: "abcd", maxZoom: 19 }
 ).addTo(map);
 
-const zonesLayer = L.featureGroup().addTo(map); // needs getBounds(); plain layerGroup lacks it
-const localLayer = L.layerGroup().addTo(map);
+// The map container is sized by CSS flexbox against its siblings; if that
+// layout hasn't settled yet at construction time, Leaflet's initial
+// setView() above can compute against a zero-size element and land on a
+// nonsensical zoom/center once the container's real size arrives. Correct
+// for that exactly once, the first time the container reports a real size --
+// not on a fixed delay (requestAnimationFrame/setTimeout can fire arbitrarily
+// late under load, by which point the user may have already navigated the
+// map themselves, and stomping on that would be a worse bug than the one
+// being fixed).
+(function stabilizeInitialView() {
+  let corrected = false;
+  const ro = new ResizeObserver(() => {
+    if (corrected) return;
+    const size = map.getSize();
+    if (size.x > 0 && size.y > 0) {
+      corrected = true;
+      ro.disconnect();
+      map.invalidateSize();
+      map.setView([20, 0], 3, { animate: false });
+    }
+  });
+  ro.observe(els.map);
+})();
+
+const zonesLayer = L.featureGroup(); // needs getBounds(); plain layerGroup lacks it. Local-mode only -- see setGlobalLayer.
+const localLayer = L.layerGroup();
 const globalLayer = L.layerGroup();
+const darkLayer = L.layerGroup();        // frozen "gone dark" vessels + their 30-min trail
+const hypothesisLayer = L.layerGroup();   // per-vessel projected scenarios, shown on click
+
+const darkMarkers = new Map(); // mmsi -> { marker, trail }
+const HYP_COLORS = ["#5ec8d8", "#22c55e", "#a78bfa", "#ff6b5c"]; // maintain / turn+ / turn- / drift
+let hypAnimTimer = null;
+let activeHypMmsi = null;
 
 function drawZones(zones) {
   zonesLayer.clearLayers();
@@ -92,7 +137,11 @@ function drawZones(zones) {
   }
   if (zones && zones.length) {
     state.zonesDrawn = true;
-    map.fitBounds(zonesLayer.getBounds().pad(6), { animate: false });
+    // Only steal the viewport for the local scenario pack's AO -- in LIVE
+    // mode the operator is looking at the real world, and a background
+    // websocket sync recentering the map out from under them was exactly
+    // the "why did the view jump" confusion this is fixing.
+    if (!state.globalLayerOn) map.fitBounds(zonesLayer.getBounds().pad(6), { animate: false });
   }
 }
 
@@ -256,7 +305,7 @@ function updateScrubber(frameIdx) {
 
 function setPlayingUi(playing) {
   state.playing = playing;
-  els.btnPlay.textContent = playing ? "⏸ Pause" : "▶ Play";
+  els.btnPlay.textContent = playing ? "PAUSE" : "PLAY";
   els.btnPlay.classList.toggle("is-playing", playing);
 }
 
@@ -346,7 +395,7 @@ function renderJtms(data) {
     const div = document.createElement("div");
     div.className = "jtms-node";
     const flipped = (data.flipped || []).includes(cid);
-    div.innerHTML = `<span class="node-id">${cid}${flipped ? " ⚙ flipped" : ""}</span>${escapeHtml(c.label)}<br><span class="status-${c.status.toLowerCase()}">${c.status}</span><div class="provenance">${escapeHtml(c.brief)}</div>`;
+    div.innerHTML = `<span class="node-id">${cid}${flipped ? " (updated)" : ""}</span>${escapeHtml(c.label)}<br><span class="status-${c.status.toLowerCase()}">${c.status}</span><div class="provenance">${escapeHtml(c.brief)}</div>`;
     els.jtmsConcls.appendChild(div);
   }
 }
@@ -368,7 +417,7 @@ async function loadBrief() {
     div.innerHTML =
       `<span class="concl-id">${b.concl_id}</span>` +
       `<span class="status-${b.status.toLowerCase()}">${b.status}</span> — ${escapeHtml(b.text)}` +
-      `<div class="provenance">model: ${b.model_used} · cost: $${b.cost_usd.toFixed(4)} · sources: ${b.source_ids.join(", ")}</div>`;
+      `<div class="provenance">model: ${fmtModelName(b.model_used)} &middot; cost: $${b.cost_usd.toFixed(4)} &middot; sources: ${b.source_ids.join(", ")}</div>`;
     els.briefList.appendChild(div);
   }
 }
@@ -400,59 +449,268 @@ document.querySelector('[data-tab="jtms"]').addEventListener("click", () => { if
 
 // ----------------------------------------------------------- global layer
 
-function globalMarkerIcon() {
-  return L.divIcon({ className: "global-dot", html: `<div style="width:5px;height:5px;border-radius:50%;background:#ffb020;box-shadow:0 0 4px #ffb020;"></div>`, iconSize: [5, 5], iconAnchor: [2, 2] });
-}
+// Rendering is viewport- and zoom-gated: with a live feed this can be
+// thousands of vessels worldwide, and building/updating that many DOM
+// markers on every pan/zoom is exactly what was making the whole page (not
+// just the map) lag. Canvas circleMarkers plus "only draw what's on screen,
+// capped" keeps the cost proportional to what's visible, not to the size of
+// the feed.
+function refreshGlobalMarkers() {
+  if (!state.globalLayerOn) return;
+  const zoom = map.getZoom();
+  if (zoom < MIN_ZOOM_FOR_MARKERS) {
+    if (globalMarkers.size) {
+      for (const m of globalMarkers.values()) globalLayer.removeLayer(m);
+      globalMarkers.clear();
+    }
+    els.zoomHint.classList.toggle("hidden", state.lastGlobalVessels.length === 0);
+    return;
+  }
+  els.zoomHint.classList.add("hidden");
 
-function applyGlobalFix(v) {
-  let m = globalMarkers.get(v.mmsi);
-  if (!m) {
-    m = L.marker([v.lat, v.lon], { icon: globalMarkerIcon(), interactive: false }).addTo(globalLayer);
-    globalMarkers.set(v.mmsi, m);
-  } else {
-    m.setLatLng([v.lat, v.lon]);
+  const bounds = map.getBounds().pad(0.15);
+  const seen = new Set();
+  let drawn = 0;
+  for (const v of state.lastGlobalVessels) {
+    if (drawn >= MAX_RENDERED_GLOBAL) break;
+    if (!bounds.contains([v.lat, v.lon])) continue;
+    seen.add(v.mmsi);
+    drawn++;
+    let m = globalMarkers.get(v.mmsi);
+    if (!m) {
+      m = L.circleMarker([v.lat, v.lon], {
+        radius: 4, color: "#ffb020", weight: 1, fillColor: "#ffb020", fillOpacity: 0.85,
+        interactive: true, bubblingMouseEvents: false,
+      }).addTo(globalLayer);
+      m.bindTooltip("", { sticky: true });
+      m.on("click", () => {
+        m.setTooltipContent(vesselTooltipHtml(m._sentinelVessel || v));
+        m.openTooltip();
+      });
+      globalMarkers.set(v.mmsi, m);
+    } else {
+      m.setLatLng([v.lat, v.lon]);
+    }
+    m._sentinelVessel = v;
+  }
+  for (const mmsi of Array.from(globalMarkers.keys())) {
+    if (!seen.has(mmsi)) {
+      globalLayer.removeLayer(globalMarkers.get(mmsi));
+      globalMarkers.delete(mmsi);
+    }
   }
 }
+
+let moveRefreshTimer = null;
+function scheduleMarkerRefresh() {
+  clearTimeout(moveRefreshTimer);
+  moveRefreshTimer = setTimeout(() => {
+    refreshGlobalMarkers();
+    refreshDarkMarkers();
+  }, 120);
+}
+map.on("moveend zoomend", scheduleMarkerRefresh);
 
 function setGlobalLayer(on) {
   state.globalLayerOn = on;
   els.btnGlobalLayer.classList.toggle("active", on);
+  els.btnGlobalLayer.textContent = on ? "LIVE" : "REPLAY";
+  els.replayControls.classList.toggle("hidden", on);
   if (on) {
     map.removeLayer(localLayer);
+    map.removeLayer(zonesLayer);
     globalLayer.addTo(map);
+    darkLayer.addTo(map);
     els.globalBadge.classList.remove("hidden");
-    els.globalBadge.textContent = state.globalLive
-      ? "LIVE GLOBAL AIS · aisstream.io"
-      : "DEMO · SYNTHETIC GLOBAL TRAFFIC · NOT LIVE AIS";
+    refreshGlobalMarkers();
+    refreshDarkMarkers();
   } else {
     map.removeLayer(globalLayer);
+    map.removeLayer(darkLayer);
+    closeHypotheses();
+    els.zoomHint.classList.add("hidden");
     localLayer.addTo(map);
+    zonesLayer.addTo(map);
+    if (state.zonesDrawn) map.fitBounds(zonesLayer.getBounds().pad(6), { animate: false });
     els.globalBadge.classList.add("hidden");
   }
 }
 els.btnGlobalLayer.addEventListener("click", () => setGlobalLayer(!state.globalLayerOn));
 
-map.on("zoomend", () => {
-  const shouldGlobal = map.getZoom() < GLOBAL_ZOOM_THRESHOLD;
-  if (shouldGlobal !== state.globalLayerOn) setGlobalLayer(shouldGlobal);
-});
+// -------------------------------------------------- gone-dark vessels + hypotheses
 
-let globalPollTimer = null;
+function fmtModelName(name) {
+  if (name === "mockllm") return "template model";
+  if (name === "litellm-fallback") return "fallback model";
+  return name;
+}
+
+function fmtDuration(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function vesselTooltipHtml(v) {
+  return `<strong>${escapeHtml(v.name || `Vessel ${v.mmsi}`)}</strong><br>MMSI ${v.mmsi} &middot; ${v.speed_kn.toFixed(1)} kn @ ${v.course.toFixed(0)}\u00b0`;
+}
+
+function upsertDarkVessel(v) {
+  let d = darkMarkers.get(v.mmsi);
+  if (!d) {
+    // Canvas circleMarker, not a DOM divIcon -- a busy day can have hundreds
+    // of real gone-dark vessels worldwide, and that many DOM nodes is
+    // exactly the class of lag the ambient layer had.
+    const marker = L.circleMarker([v.last_lat, v.last_lon], {
+      radius: 6, color: "#ffb020", weight: 2, fillColor: "#ffb020", fillOpacity: 0.18,
+      dashArray: "3 3", interactive: true, bubblingMouseEvents: false,
+    }).addTo(darkLayer);
+    const trail = L.polyline([], { color: "#ffb020", weight: 1.6, opacity: 0.45, dashArray: "2 4", interactive: false }).addTo(darkLayer);
+    marker.on("click", () => showHypotheses(v.mmsi));
+    d = { marker, trail };
+    darkMarkers.set(v.mmsi, d);
+  } else {
+    d.marker.setLatLng([v.last_lat, v.last_lon]);
+  }
+  d.trail.setLatLngs((v.trail || []).map((p) => [p[0], p[1]]));
+  d.marker.bindTooltip(
+    `${v.name} \u00b7 dark ${fmtDuration(v.dark_s)} \u00b7 last ${v.last_speed_kn.toFixed(1)} kn @ ${v.last_course.toFixed(0)}\u00b0 \u00b7 click to project`,
+    { sticky: true }
+  );
+  d._sentinelVessel = v;
+}
+
+function removeDarkVessel(mmsi) {
+  const d = darkMarkers.get(mmsi);
+  if (!d) return;
+  darkLayer.removeLayer(d.marker);
+  darkLayer.removeLayer(d.trail);
+  darkMarkers.delete(mmsi);
+  if (activeHypMmsi === mmsi) closeHypotheses();
+}
+
+function refreshDarkMarkers() {
+  if (!state.globalLayerOn) return;
+  if (map.getZoom() < MIN_ZOOM_FOR_MARKERS) {
+    for (const mmsi of Array.from(darkMarkers.keys())) removeDarkVessel(mmsi);
+    return;
+  }
+  const bounds = map.getBounds().pad(0.15);
+  const seen = new Set();
+  let drawn = 0;
+  for (const v of state.lastDarkVessels) {
+    if (drawn >= MAX_RENDERED_DARK) break;
+    if (!bounds.contains([v.last_lat, v.last_lon])) continue;
+    seen.add(v.mmsi);
+    drawn++;
+    upsertDarkVessel(v);
+  }
+  for (const mmsi of Array.from(darkMarkers.keys())) {
+    if (!seen.has(mmsi)) removeDarkVessel(mmsi);
+  }
+}
+
+async function pollDark() {
+  try {
+    const data = await getJson("/api/global/dark");
+    state.lastDarkVessels = data.vessels || [];
+    refreshDarkMarkers();
+    if (state.globalLayerOn) els.statsDark.textContent = state.lastDarkVessels.length;
+  } catch (err) {
+    // best-effort, same discipline as pollGlobal()
+  }
+}
+setInterval(pollDark, DARK_POLL_MS);
+pollDark();
+
+function closeHypotheses() {
+  clearInterval(hypAnimTimer);
+  hypAnimTimer = null;
+  activeHypMmsi = null;
+  hypothesisLayer.clearLayers();
+  map.removeLayer(hypothesisLayer);
+  els.hypPanel.classList.add("hidden");
+}
+els.hypClose.addEventListener("click", closeHypotheses);
+
+async function showHypotheses(mmsi) {
+  closeHypotheses();
+  activeHypMmsi = mmsi;
+  let data;
+  try {
+    data = await getJson(`/api/global/dark/${mmsi}/hypotheses`);
+  } catch (err) {
+    return;
+  }
+  if (!data || !data.hypotheses) return;
+
+  const sourceLabel = { track: "derived from track", stationary: "stationary (no net motion)", reported: "self-reported" }[data.origin.kinematics_source] || "self-reported";
+  els.hypTitle.textContent = data.name;
+  els.hypMeta.innerHTML =
+    `Last fix: ${new Date(data.origin.ts * 1000).toISOString().substr(11, 8)} UTC<br>` +
+    `Dark for: ${fmtDuration(data.dark_s)} &middot; course/speed ${sourceLabel}: ${data.origin.course.toFixed(0)}&deg; / ${data.origin.speed_kn.toFixed(1)} kn<br>` +
+    `Projecting ${fmtDuration(data.horizon_s)} beyond now`;
+  els.hypLegend.innerHTML = "";
+  const radiusEls = [];
+  data.hypotheses.forEach((h, i) => {
+    const row = document.createElement("div");
+    row.className = "hyp-row";
+    row.innerHTML =
+      `<span class="swatch" style="background:${HYP_COLORS[i % HYP_COLORS.length]}"></span>` +
+      `<span class="hyp-label">${h.label}</span>` +
+      `<span class="hyp-radius">&plusmn;${h.radius_km_now.toFixed(1)} km</span>`;
+    els.hypLegend.appendChild(row);
+    radiusEls.push(row.querySelector(".hyp-radius"));
+  });
+  els.hypPanel.classList.remove("hidden");
+  hypothesisLayer.addTo(map);
+
+  const lines = [];
+  const dots = [];
+  const ellipses = [];
+  data.hypotheses.forEach((h, i) => {
+    const color = HYP_COLORS[i % HYP_COLORS.length];
+    lines.push(L.polyline([[data.origin.lat, data.origin.lon]], { color, weight: 2, opacity: 0.8, dashArray: "5 5", interactive: false }).addTo(hypothesisLayer));
+    dots.push(L.circleMarker([data.origin.lat, data.origin.lon], { radius: 5, color, fillColor: color, fillOpacity: 0.9, weight: 1.5 }).addTo(hypothesisLayer));
+    ellipses.push(L.polygon([], { color, weight: 1.2, fillColor: color, fillOpacity: 0.07, dashArray: "3 4", interactive: false }).addTo(hypothesisLayer));
+  });
+
+  let step = 0;
+  const nSteps = data.hypotheses[0].frames.length;
+  const advance = () => {
+    data.hypotheses.forEach((h, i) => {
+      const f = h.frames[step];
+      if (!f) return;
+      dots[i].setLatLng([f.lat, f.lon]);
+      lines[i].addLatLng([f.lat, f.lon]);
+      ellipses[i].setLatLngs(f.ellipse.map((p) => [p[0], p[1]]));
+      if (radiusEls[i]) radiusEls[i].textContent = `\u00b1${f.radius_km.toFixed(1)} km`;
+    });
+    step = (step + 1) % nSteps;
+    if (step === 0) {
+      data.hypotheses.forEach((h, i) => lines[i].setLatLngs([[data.origin.lat, data.origin.lon]]));
+    }
+  };
+  advance();
+  hypAnimTimer = setInterval(advance, 220);
+}
+
 async function pollGlobal() {
   try {
     const data = await getJson("/api/global");
     state.globalLive = !!data.live;
-    for (const v of data.vessels || []) applyGlobalFix(v);
+    state.lastGlobalVessels = data.vessels || [];
     if (state.globalLayerOn) {
+      refreshGlobalMarkers();
       els.globalBadge.textContent = state.globalLive
-        ? `LIVE GLOBAL AIS · aisstream.io · ${data.vessels.length} contacts`
-        : "DEMO · SYNTHETIC GLOBAL TRAFFIC · NOT LIVE AIS";
+        ? `LIVE GLOBAL TRAFFIC · ${state.lastGlobalVessels.length} CONTACTS`
+        : "CONNECTING TO LIVE TRAFFIC FEED\u2026";
+      els.statsTracks.textContent = state.lastGlobalVessels.length;
     }
   } catch (err) {
     // Global layer is best-effort; local pack streaming must never depend on it.
   }
 }
-globalPollTimer = setInterval(pollGlobal, 4000);
+setInterval(pollGlobal, GLOBAL_POLL_MS);
 pollGlobal();
 
 // ---------------------------------------------------------------- websocket
@@ -502,7 +760,7 @@ function applyMessage(msg) {
       renderLogEntries(entries, { replace: false });
       const crit = (msg.alerts || []).find((a) => a.severity === "critical");
       if (crit) {
-        els.banner.textContent = `⚠ ${crit.headline}`;
+        els.banner.textContent = `CRITICAL \u2014 ${crit.headline}`;
         els.banner.classList.remove("hidden");
       }
     }
@@ -540,5 +798,6 @@ document.addEventListener("keydown", (ev) => {
   else if (ev.key === "Escape") els.btnReset.click();
 });
 
+setGlobalLayer(true); // LIVE is the default view: real-time global AIS, no replay controls
 connect();
 jtmsReset().then(loadBrief);

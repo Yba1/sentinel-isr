@@ -23,3 +23,8 @@ env/
 # reintroduce a bare `data/` or `geo/` line here.
 /data/raw/
 /geo/
+
+# Persisted global-AIS position history (data/global_ais.py). Real vessel
+# tracks, not a fixture -- never committed, rebuilds itself from the live
+# feed on next boot.
+/.ais_state/

@@ -33,3 +33,6 @@ shapely==2.1.2
 # deterministic template with no key and no network -- see JAC_SETUP.md.
 byllm>=0.6
 litellm>=1.40
+
+# web/server.py: REST + WebSocket transport for the dashboard.
+aiohttp>=3.9

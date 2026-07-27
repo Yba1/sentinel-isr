@@ -48,7 +48,7 @@ from aiohttp import web, WSMsgType
 import jaclang  # noqa: F401  -- registers the .jac import hook
 
 from data.scenario import load_scenario
-from data.global_ais import GlobalAisFeed, global_snapshot
+from data.global_ais import GlobalAisFeed, global_snapshot, dark_snapshot, hypothesis_paths
 from jac.graph import build_mission
 from jac.main import run_frame_scored
 from jac import jtms
@@ -387,7 +387,26 @@ def build_app(cache: dict) -> web.Application:
     async def api_global(request: web.Request) -> web.Response:
         return web.json_response(global_snapshot(app["global_feed"]))
 
+    async def api_global_dark(request: web.Request) -> web.Response:
+        return web.json_response(dark_snapshot(app["global_feed"]))
+
+    async def api_global_dark_hypotheses(request: web.Request) -> web.Response:
+        try:
+            mmsi = int(request.match_info["mmsi"])
+        except ValueError:
+            return web.json_response({"error": "mmsi must be an integer"}, status=400)
+        horizon_s = request.query.get("horizon_s")
+        result = hypothesis_paths(
+            app["global_feed"], mmsi,
+            horizon_s=float(horizon_s) if horizon_s else None,
+        )
+        if result is None:
+            return web.json_response({"error": f"no dark vessel with mmsi {mmsi}"}, status=404)
+        return web.json_response(result)
+
     app.router.add_get("/api/global", api_global)
+    app.router.add_get("/api/global/dark", api_global_dark)
+    app.router.add_get("/api/global/dark/{mmsi}/hypotheses", api_global_dark_hypotheses)
     app.router.add_get("/api/scenario", api_scenario)
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/play", api_play)

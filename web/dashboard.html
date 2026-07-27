@@ -4,6 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Sentinel-ISR :: Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="dashboard.css" />
 </head>
@@ -25,7 +28,17 @@
     <div id="map-wrap">
       <div id="map"></div>
       <div id="global-badge" class="global-badge hidden">
-        DEMO &middot; SYNTHETIC GLOBAL TRAFFIC &middot; NOT LIVE AIS
+        CONNECTING TO LIVE AIS&hellip;
+      </div>
+      <div id="zoom-hint" class="zoom-hint hidden">Zoom in to render live vessel positions</div>
+      <div id="hypothesis-panel" class="hypothesis-panel hidden">
+        <div class="hyp-header">
+          <span id="hyp-title">&mdash;</span>
+          <span id="hyp-close" class="hyp-close" title="Close">CLOSE</span>
+        </div>
+        <div id="hyp-meta" class="hyp-meta"></div>
+        <div id="hyp-legend" class="hyp-legend"></div>
+        <div class="hyp-note">Kinematic projection only &mdash; no satellite/RF detection feed configured. Ellipses grow with elapsed dark time, same diffusion model as a coasting Kalman track.</div>
       </div>
       <div id="stats-overlay">
         <div class="stat"><span id="id-switch-count">0</span><label>id switches</label></div>
@@ -42,18 +55,18 @@
       </div>
 
       <div id="tab-brief" class="tab-pane active">
-        <p class="hint">Real Briefer output (jac/brief.jac) over the current MMSI-spoof JTMS graph. Falls back to template text with no API key configured &mdash; cost then reads $0.00, honestly.</p>
+        <p class="hint">Intelligence brief generated from the current identity-verification graph.</p>
         <div id="brief-list"></div>
       </div>
 
       <div id="tab-jtms" class="tab-pane">
-        <p class="hint">Live justification graph (jac/jtms.jac). Retract a Fact and every dependent Conclusion re-propagates to a fixpoint.</p>
+        <p class="hint">Live identity-verification graph. Retracting a piece of evidence re-propagates every dependent conclusion automatically.</p>
         <div id="jtms-facts"></div>
         <div id="jtms-concls"></div>
       </div>
 
       <div id="tab-eval" class="tab-pane">
-        <p class="hint">tracker/eval.py regression harness, run on demand.</p>
+        <p class="hint">Regression test suite for the tracking pipeline, run on demand.</p>
         <div id="eval-summary"></div>
         <div id="eval-list"></div>
       </div>
@@ -62,23 +75,26 @@
   </div>
 
   <div id="transport">
-    <button id="btn-reset" class="tbtn" title="Reset to frame 0 [Esc]">&#9198; Reset</button>
-    <button id="btn-play" class="tbtn tbtn-primary" title="Play / Pause [Space]">&#9654; Play</button>
+    <button id="btn-global-layer" class="tbtn tbtn-primary" title="LIVE: real-time global traffic. REPLAY: scripted scenario pack.">LIVE</button>
 
-    <div class="speed-group" role="group" aria-label="Playback speed">
-      <button class="tbtn speed-btn" data-speed="1">1&times;</button>
-      <button class="tbtn speed-btn" data-speed="10">10&times;</button>
-      <button class="tbtn speed-btn" data-speed="60">60&times;</button>
+    <div id="replay-controls" class="replay-controls hidden">
+      <button id="btn-reset" class="tbtn" title="Reset to frame 0 [Esc]">RESET</button>
+      <button id="btn-play" class="tbtn tbtn-primary" title="Play / Pause [Space]">PLAY</button>
+
+      <div class="speed-group" role="group" aria-label="Playback speed">
+        <button class="tbtn speed-btn" data-speed="1">1&times;</button>
+        <button class="tbtn speed-btn" data-speed="10">10&times;</button>
+        <button class="tbtn speed-btn" data-speed="60">60&times;</button>
+      </div>
+
+      <input id="scrubber" type="range" min="0" max="0" value="0" step="1" />
+      <div id="frame-readout">frame 0 / 0 &middot; 0:00:00</div>
+
+      <select id="pack-picker" title="Scenario pack"></select>
+
+      <button id="btn-assoc" class="tbtn" title="Toggle naive-greedy vs global Hungarian [M]">GLOBAL</button>
+      <button id="btn-retract" class="tbtn" title="Retract broadcast_b_mmsi [X]">RETRACT MMSI</button>
     </div>
-
-    <input id="scrubber" type="range" min="0" max="0" value="0" step="1" />
-    <div id="frame-readout">frame 0 / 0 &middot; 0:00:00</div>
-
-    <select id="pack-picker" title="Scenario pack"></select>
-
-    <button id="btn-assoc" class="tbtn" title="Toggle naive-greedy vs global Hungarian [M]">GLOBAL</button>
-    <button id="btn-retract" class="tbtn" title="Retract broadcast_b_mmsi [X]">&#9888; Retract MMSI</button>
-    <button id="btn-global-layer" class="tbtn" title="Toggle synthetic global traffic layer">&#127760; Global</button>
 
     <div id="conn-status" class="conn-status">connecting&hellip;</div>
   </div>
