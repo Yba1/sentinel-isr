@@ -865,3 +865,117 @@ def extended_self_check_report() -> str {
     lines.append(session_length_report(summaries, frame_interval_s=30.0));
     return "\n".join(lines);
 }
+
+
+# ---------------------------------------------------------------------------
+# Scenario-comparison export -- a standalone "diff two runs" helper: given
+# two packs' summaries (e.g. the same pack under greedy vs global
+# association, mirroring jac/fusion.jac's real assoc_mode toggle), report
+# where their narrative beats diverge. Purely exploratory; nothing in
+# web/server.py or web/dashboard.js calls this.
+# ---------------------------------------------------------------------------
+
+def _narrative_signature(summary: dict) -> tuple {
+    """A coarse per-frame signature for narrative-alignment comparison:
+    whether the frame is quiet, and how many alerts/id-switches it carries.
+    Two runs whose signatures diverge at the same frame index are telling
+    a meaningfully different story at that point, not just differing in
+    exact track positions (which will always differ frame-to-frame between
+    two association strategies even when the narrative is the same)."""
+    return (
+        is_quiet_frame(summary),
+        summary.get("n_alerts", 0),
+        summary.get("id_switches_delta", 0),
+    );
+}
+
+
+def narrative_divergence_frames(summaries_a: list, summaries_b: list) -> list {
+    """Frame indices where two runs' narrative signatures differ, up to the
+    shorter run's length -- a run that ends early is not itself flagged as
+    diverging past that point, since there is nothing to compare against."""
+    n = min(len(summaries_a), len(summaries_b));
+    diverge = [];
+    for i in range(n) {
+        sig_a = _narrative_signature(summaries_a[i]);
+        sig_b = _narrative_signature(summaries_b[i]);
+        if sig_a != sig_b {
+            diverge.append(i);
+        }
+    }
+    return diverge;
+}
+
+
+def narrative_agreement_fraction(summaries_a: list, summaries_b: list) -> float {
+    """1.0 minus the divergence rate over the compared span -- 1.0 for two
+    empty/identical runs, since there is nothing to disagree about."""
+    n = min(len(summaries_a), len(summaries_b));
+    if n == 0 {
+        return 1.0;
+    }
+    diverge = narrative_divergence_frames(summaries_a, summaries_b);
+    return 1.0 - (len(diverge) / n);
+}
+
+
+def comparison_report(label_a: str, summaries_a: list,
+                       label_b: str, summaries_b: list) -> str {
+    """Human-readable summary of narrative_divergence_frames()'s output --
+    agreement fraction plus the first handful of divergence points, so a
+    long divergence list does not flood the report."""
+    diverge = narrative_divergence_frames(summaries_a, summaries_b);
+    agreement = narrative_agreement_fraction(summaries_a, summaries_b);
+    shown = diverge[:15];
+
+    lines = [f"=== {label_a} vs {label_b} narrative comparison ==="];
+    lines.append(f"compared frames: {min(len(summaries_a), len(summaries_b))}");
+    lines.append(f"narrative agreement: {agreement:.1%}");
+    lines.append(f"divergence points ({len(diverge)} total, first {len(shown)} shown): {shown}");
+    return "\n".join(lines);
+}
+
+
+# ---------------------------------------------------------------------------
+# Export helpers -- turning any of this module's report strings into a flat
+# JSON-serialisable dict, for a hypothetical future REST endpoint that does
+# not exist anywhere in web/server.py today.
+# ---------------------------------------------------------------------------
+
+def pacing_summary_dict(summaries: list, frame_interval_s: float,
+                         base_speed: float = BASE_SPEED) -> dict {
+    """Everything full_pacing_report()/session_length_report() compute,
+    as a plain dict rather than a formatted string -- the shape a JSON
+    endpoint would actually want to return, as opposed to the
+    human-readable report functions elsewhere in this file."""
+    ramped = annotate_and_ramp(summaries, base_speed=base_speed);
+    marks = bookmark_labels(summaries);
+    windows = highlight_windows(summaries);
+
+    fixed_speeds = [base_speed for _ in summaries];
+    fixed_s = estimated_wallclock_seconds(fixed_speeds, frame_interval_s);
+    adaptive_s = estimated_wallclock_seconds(ramped, frame_interval_s);
+
+    return {
+        "n_frames": len(summaries),
+        "quiet_fraction": quiet_fraction(summaries),
+        "bookmarks": marks,
+        "highlight_windows": windows,
+        "fixed_wallclock_s": fixed_s,
+        "adaptive_wallclock_s": adaptive_s,
+        "sparkline": normalize_sparkline(speed_sparkline(ramped)),
+    };
+}
+
+
+def multi_pack_pacing_summary(pack_summaries: dict, frame_interval_s: float,
+                               base_speed: float = BASE_SPEED) -> dict {
+    """pacing_summary_dict() for every pack in `pack_summaries`, keyed the
+    same way -- the batch form a future "compare all my precomputed packs"
+    endpoint would call once at startup rather than per-request."""
+    out = {};
+    for (pack_id, summaries) in pack_summaries.items() {
+        out[pack_id] = pacing_summary_dict(summaries, frame_interval_s, base_speed=base_speed);
+    }
+    return out;
+}
