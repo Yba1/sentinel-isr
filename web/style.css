@@ -1,0 +1,241 @@
+/* Sentinel-ISR frontend. Dark, high-contrast, sized to read from three
+   metres away -- this is a demo screen, not a dashboard someone sits close
+   to. The frontend does no computation: every number here is a straight
+   passthrough of a field the server already put in the FrameDelta. */
+
+:root {
+  --bg: #0a0e13;
+  --panel: #0f151c;
+  --border: #1e293b;
+  --text: #e2e8f0;
+  --text-dim: #7c8ba1;
+  --tentative: #5b6673;
+  --confirmed: #2dd4bf;
+  --coasting: #f59e0b;
+  --critical: #ef4444;
+  --info: #93c5fd;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 18px;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+.main-row {
+  flex: 1 1 90%;
+  min-height: 0;
+  display: flex;
+}
+
+/* ---------------------------------------------------------- event log rail */
+
+#eventlog {
+  flex: 0 0 20%;
+  min-width: 220px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 0.6rem 0.7rem;
+  overflow: hidden;
+}
+
+.rail-title {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin: 0 0 0.5rem 0;
+  flex: 0 0 auto;
+}
+
+#log-entries {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.log-line {
+  padding: 3px 6px;
+  border-radius: 3px;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.log-line .tag {
+  font-weight: 800;
+  margin-right: 0.35em;
+}
+
+.log-fusion   { color: var(--info); }
+.log-event    { color: #c4b5fd; }
+.log-track    { color: var(--confirmed); }
+.log-zone     { color: var(--coasting); }
+.log-log      { color: var(--text-dim); }
+
+.log-alert-info     { color: var(--info); background: rgba(147, 197, 253, 0.08); font-weight: 600; }
+.log-alert-warning  { color: var(--coasting); background: rgba(245, 158, 11, 0.10); font-weight: 700; }
+.log-alert-critical { color: var(--critical); background: rgba(239, 68, 68, 0.14); font-weight: 800; }
+
+/* ------------------------------------------------------------------- map */
+
+#map {
+  flex: 1 1 70%;
+  min-width: 0;
+  background: #060a0e;
+}
+
+.track-icon { pointer-events: auto; transition: transform 0.18s linear; }
+
+.track-triangle {
+  width: 0;
+  height: 0;
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-bottom: 15px solid #5b6673;
+  transform-origin: 50% 65%;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.8));
+}
+
+/* ------------------------------------------------------------- id-switch rail */
+
+#idpanel {
+  flex: 0 0 10%;
+  min-width: 130px;
+  background: #140508;
+  border-left: 2px solid #7f1d1d;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  padding: 0.5rem;
+}
+
+.idpanel-label {
+  font-size: 0.85rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: #fca5a5;
+  text-align: center;
+}
+
+#id-switch-count {
+  font-size: 4.6rem;
+  font-weight: 900;
+  color: var(--critical);
+  line-height: 1;
+  text-shadow: 0 0 18px rgba(239, 68, 68, 0.55);
+  font-variant-numeric: tabular-nums;
+}
+
+#id-switch-count.flash {
+  animation: id-flash 700ms ease-out;
+}
+
+@keyframes id-flash {
+  0%   { color: #fff; text-shadow: 0 0 30px #fff; transform: scale(1.15); }
+  100% { color: var(--critical); text-shadow: 0 0 18px rgba(239, 68, 68, 0.55); transform: scale(1); }
+}
+
+.idpanel-sub {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------- transport */
+
+#transport {
+  flex: 0 0 10%;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0 1.1rem;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+}
+
+.tbtn {
+  font-size: 1rem;
+  font-weight: 700;
+  padding: 0.55rem 1.1rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #17202b;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.tbtn:hover { background: #1f2a38; }
+.tbtn:active { transform: translateY(1px); }
+
+.tbtn-primary { background: #0d3b36; border-color: var(--confirmed); color: var(--confirmed); min-width: 6.5rem; }
+.tbtn-primary:hover { background: #114a44; }
+.tbtn-primary.is-playing { background: var(--coasting); border-color: var(--coasting); color: #1a1200; }
+
+.speed-group { display: flex; gap: 0.35rem; }
+.speed-btn { padding: 0.55rem 0.8rem; min-width: 3.2rem; }
+.speed-btn.active { background: var(--confirmed); color: #04201c; border-color: var(--confirmed); }
+
+#scrubber {
+  flex: 1 1 auto;
+  height: 8px;
+  accent-color: var(--confirmed);
+  cursor: pointer;
+}
+
+#frame-readout {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.95rem;
+  color: var(--text-dim);
+  min-width: 15ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.conn-status {
+  font-size: 0.8rem;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  background: #1e293b;
+  color: var(--text-dim);
+}
+
+.conn-status.ok { background: #0d3b36; color: var(--confirmed); }
+.conn-status.bad { background: #3b0d0d; color: var(--critical); }
+
+/* --------------------------------------------------------------- leaflet */
+
+.leaflet-container { background: #060a0e; }
+.leaflet-popup-content-wrapper { background: #0f151c; color: var(--text); }
+.leaflet-popup-tip { background: #0f151c; }
+.leaflet-tooltip {
+  background: #0f151c;
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+}

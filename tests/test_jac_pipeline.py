@@ -102,7 +102,9 @@ def test_s01_real_traffic_smoke():
     mission = result["mission"]
     assert len(result["deltas"]) == 40
     assert len(tracks_of(mission)) > 200
+    # Zone id from Omar's authored s01 pack (monterey_bay_nms), which replaced an
+    # earlier placeholder pack that shipped two different demo zone ids
+    # (central_bay_sanctuary / gate_approach_restricted) -- this test predated
+    # that swap and was never updated to the real pack's actual geofence_layers.
     zones = result["deltas"][0]["zones"]
-    assert {z["zone_id"] for z in zones} == {
-        "central_bay_sanctuary", "gate_approach_restricted",
-    }
+    assert {z["zone_id"] for z in zones} == {"monterey_bay_nms"}

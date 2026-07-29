@@ -14,10 +14,13 @@ Identity is never used for association — recovering it from kinematics alone i
 
 | Phase | Module | State |
 |---|---|---|
-| 1 | `tracker/kalman.py` — constant-velocity Kalman filter | **done**, 27 tests |
-| 2 | `tracker/assoc.py`, `tracker/metrics.py` — gating, NLL cost, padded Hungarian, lifecycle | **done**, 95 tests |
-| 3 | Hypothesis branching as Jac walker spawning | not started |
-| 4 | `jac/` — geofence intrusion + dark-vessel re-association, as walkers | **done**, 26 jac tests |
+| 1 | `tracker/kalman.py` — constant-velocity Kalman filter | **done** |
+| 2 | `tracker/assoc.py`, `tracker/metrics.py` — gating, NLL cost, padded Hungarian, lifecycle | **done** |
+| 3 | `jac/hypothesis.jac` — hypothesis branching as Jac walker spawning | **done** |
+| 3.5 | `tracker/geofence.py`, `jac/geofence.jac`, `jac/fences.jac` — geofence intrusion | **done** |
+| 4 | `tracker/dark.py` — dark-vessel prediction and re-association | **done** |
+| 5 | `jac/jtms.jac` — JTMS retraction (Doyle 1979), `jac/brief.jac` — brief panel + LLM polish | **done** |
+| — | `jac/graph.jac`, `jac/driver.jac`, `jac/fusion.jac`, `jac/alerts.jac`, `jac/render.jac`, `web/`, `data/` — graph schema, scenario replay, map frontend | **done** (Abhi) |
 
 ## Jac layer (the graph IS the system)
 
@@ -46,8 +49,11 @@ Boundary: Kalman predict/update, gating, cost matrices, the Hungarian solve,
 eigendecomposition and shapely all stay in Python. `tracker/assoc.py` owns the
 track lifecycle too — a `Track` node holds a `tracker.assoc.Track` and
 *projects* its status, hits and LLR score rather than running a second state
-machine. Line split: 1,755 Jac / 2,077 Python product code (**45.8% Jac**),
-counted with `find . -name "*.jac" | xargs wc -l`.
+machine. Line split at merge time: 45.8% Jac on this branch alone before merging,
+~66% Jac on the tracker branch alone before merging (see Status above) — neither
+is the combined-repo truth. Recompute after merge with
+`find . -name "*.jac" | xargs wc -l` against `tracker/*.py` before quoting a
+number on stage.
 
 ### Two-stage association (dark-vessel re-acquisition)
 
@@ -75,6 +81,39 @@ Silence from an already-dark track is scored at `p_detect=0.05` rather than
 0.9 — a vessel that deliberately stopped transmitting is not one we expected
 to detect and failed to, and at 0.9 the LLR floor kills it in minutes.
 
+## Web layer (map + transport + live event log)
+
+`web/index.html` + `web/app.js` + `web/style.css` are the frontend: Leaflet on
+CartoDB `dark_matter` tiles, tracks as fading polyline trails (last 20 fixes)
+with a heading-rotated triangle at the current position, coloured by status
+(tentative grey, confirmed cyan, coasting amber, dark-in-zone red). No build
+step, no framework — every value drawn is a field the server already put in
+the FrameDelta; if a computation shows up in `app.js`, that's a bug in
+`jac/render.jac` instead. Layout: map 70% / event log 20% left rail /
+ID-switch counter 10% right rail, transport bar 10% along the bottom.
+
+`web/server.py` is the (non-deliverable) minimum backend those files need:
+it runs the full Jac pipeline **once** at startup and caches every frame's
+render-ready delta, which is what makes scrubbing an O(1) array index instead
+of a re-run — confirmed at 13 ms for a seek 200 frames in on the real-traffic
+pack. The ID-switch counter is computed server-side from ground truth
+(`tracker.metrics.TrackingMetrics`) and only the scalar count crosses the
+wire; the frontend never sees which track_id is which vessel.
+
+```bash
+PYTHONPATH=. python web/server.py                                  # s02, boots in <1s
+SENTINEL_PACK=s01_dark_in_sanctuary PYTHONPATH=. python web/server.py  # real traffic, ~2-3 min precompute
+# then open http://localhost:8765/
+```
+
+Confirmed on the real-traffic pack: 300+ live tracks animate at 60x with no
+stutter, scrubbing is instant, transport controls (`/api/play`, `/pause`,
+`/speed`, `/seek`, `/reset`) are wired to the WebSocket stream. The id-switch
+count on that pack is in the thousands — an honest number given real AIS
+reporting gaps against the current lifecycle tuning (Phase 2's
+`delete_after_misses`/`confirm_hits` defaults), not a frontend artifact; a
+tuning pass on that is Phase 2 work, not this one.
+
 ## Data layer (scenario packs + replay)
 
 `data/scenario.py` loads a scenario pack (`scenarios/<id>/pack.json`) into memory: real
@@ -97,7 +136,13 @@ Measured on `s01_dark_in_sanctuary`: 328 vessels, 69,530 measurements, load 0.24
 seek 3 µs. Swapping packs is a string change (`s02_synthetic_demo` is the
 synthetic-only fallback).
 
-122 tests total, all passing.
+Also shipped, not in the original phase list: `tracker/eval.py` / `jac/eval.jac` (scenario
+regression harness) and `tracker/contracts.py` / `jac/contracts.jac` (cross-teammate contract
+reconciliation — kind vocabulary, field-name aliasing, origin/bbox/epoch parsing).
+
+686 tests total, all passing. Jac share of product code (`jac/` + `tracker/`): **~60%**,
+excluding tests from the denominator (see `docs/partial-submission-checklist.md` for the
+open question of whether tests count toward the 40% floor).
 
 ## Phase 2 acceptance
 
@@ -188,6 +233,8 @@ selection matrix `H`.
 python -m pytest tests/ -q
 ```
 
-Requires Python 3.12 (jaclang's runtime needs `typing.override`); see
-`requirements.txt`. No API keys, no network — the LLM layer runs on `mockllm`
-by default and records provenance when it falls back to templates.
+Requires **Python 3.12+** (`jaclang` uses `typing.override`, 3.12-only — see `JAC_SETUP.md`),
+numpy, scipy, shapely, pytest, jaclang, byllm, litellm — see `requirements.txt`.
+No API keys, no network required: `by llm()` calls (`jac/alerts.jac`, `jac/brief.jac`) run
+on `mockllm` by default and honestly record provenance (`model_used`) whenever they fall
+back to a deterministic template.

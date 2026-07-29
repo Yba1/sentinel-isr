@@ -11,8 +11,20 @@ env/
 .idea/
 .DS_Store
 
-# Raw downloads are fetched, not committed. data/*.py is the replay layer (committed);
-# extracted per-pack AIS windows (scenarios/*/ais_window.csv, ~1 MB) are committed too
-# so the demo runs without the 400 MB MarineCadastre pull.
+# Jac build/state junk. `.jac/` matches at any depth, so it covers both the repo-root
+# .jac/data/ session db and jac/.jac/cache/. It does NOT touch jac/*.jac source files.
+.jac/
+
+# Raw downloads are fetched, not committed (~400 MB MarineCadastre pull). data/*.py is
+# the replay layer and IS committed; extracted per-pack AIS windows
+# (scenarios/*/ais_window.csv, ~1 MB) are committed too so the demo runs offline.
+# NOTE: earlier revisions of this file ignored data/ and geo/ wholesale, which would
+# have silently dropped data/*.py and geo/*.geojson on the next `git add -A` -- do not
+# reintroduce a bare `data/` or `geo/` line here.
 /data/raw/
 /geo/
+
+# Persisted global-AIS position history (data/global_ais.py). Real vessel
+# tracks, not a fixture -- never committed, rebuilds itself from the live
+# feed on next boot.
+/.ais_state/

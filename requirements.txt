@@ -1,8 +1,38 @@
-# Python 3.12 required: jaclang's runtime uses typing.override (3.12+).
-numpy>=1.26
-scipy>=1.11
-shapely>=2.0
-pytest>=8.0
-jaclang>=0.16
+# ============================================================================
+# HARD REQUIREMENT: Python >= 3.12.  Do not try to make this work on 3.11.
+#
+# jaclang uses `typing.override`, which only exists in Python 3.12+.
+# Every jaclang from 0.13.2 onward declares requires_python >= 3.12, so on a
+# 3.11 interpreter pip silently back-solves to jaclang 0.10.2 -- which then
+# dies at import with:
+#
+#     ImportError: cannot import name 'override' from 'typing'
+#
+# There is NO jaclang release that works on Python 3.11. (jaclang 2.0.0 exists
+# on PyPI but is YANKED -- do not use it.)
+#
+# Known-good interpreter on this machine:
+#   C:\Users\raj_k\AppData\Local\Programs\Python\Python312\python.exe   (3.12.4)
+#
+# Install with:  setup_env.ps1  (PowerShell)  or  ./setup_env.sh  (bash)
+#
+# jaclang is PINNED, not >=, because specific 0.16.7 syntax and compiler bugs
+# (see JAC_SETUP.md) were verified by running -- a floating >=0.16 can silently
+# pick up a newer release whose syntax or compiler behaviour has moved.
+# ============================================================================
+
+jaclang==0.16.7
+numpy==2.5.1
+scipy==1.18.0
+pytest==9.1.1
+
+# Phase 3.5 geofencing: point-in-polygon via STRtree, in-memory, no PostGIS.
+shapely==2.1.2
+
+# by llm() brief generation (jac/alerts.jac, jac/brief.jac). Falls back to a
+# deterministic template with no key and no network -- see JAC_SETUP.md.
 byllm>=0.6
 litellm>=1.40
+
+# web/server.py: REST + WebSocket transport for the dashboard.
+aiohttp>=3.9

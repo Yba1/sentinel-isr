@@ -66,6 +66,23 @@ def ellipse_for(trk: Track) -> list {
 }
 
 
+"""Same ring as ellipse_for(), converted to (lat, lon) against the mission
+origin. ellipse_for() stays in ENU metres for anything that scores or tests
+against ground-truth geometry; a Leaflet frontend needs lat/lon and must not
+be the one doing that conversion (this project's "frontend does no
+computation" rule -- see web/app.js's module docstring)."""
+def ellipse_latlon_for(trk: Track, origin: tuple) -> list {
+    return [
+        [round(lat, 6), round(lon, 6)]
+        for (lat, lon) in [enu_to_lla(p[0], p[1], origin[0], origin[1])
+                           for p in cov_ellipse_points(
+                               trk.x, trk.y, trk.p00, trk.p01, trk.p11,
+                               k_sigma=2.0, n_points=24,
+                           )]
+    ];
+}
+
+
 walker Renderer {
     has origin: tuple = (0.0, 0.0);
     has payloads: list = [];
@@ -94,6 +111,7 @@ walker Renderer {
             "dark": here.status == STATUS_COASTING,
             "color": track_color(here.status, in_zone),
             "ellipse": ellipse_for(here),
+            "ellipse_latlon": ellipse_latlon_for(here, self.origin),
             "zones": list(here.zones_in),
             "last_source": here.last_source,
             "label": f"{here.track_id} · {round(spd * 1.94384, 1)} kn",
