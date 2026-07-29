@@ -21,9 +21,9 @@
       "track": "gen:transit_then_loiter",
       "params": {
         "start_latlon": [37.805, -122.468],
-        "heading_deg": 60.0,
+        "heading_deg": 59.0,
         "speed_mps": 5.0,
-        "transit_s": 1000.0,
+        "transit_s": 930.0,
         "loiter_radius_m": 200.0,
         "loiter_speed_mps": 1.5,
         "t_start": 0.0,
@@ -44,11 +44,12 @@
   ],
   "events": [
     {"id": "ev_dark", "t": 300.0, "kind": "ais_off", "actor": "ghost_1"},
-    {"id": "ev_r1", "t": 1500.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_r2", "t": 2100.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_r3", "t": 2700.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_r4", "t": 3600.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
-    {"id": "ev_r5", "t": 4500.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r1", "t": 540.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r2", "t": 840.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r3", "t": 1140.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r4", "t": 1740.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r5", "t": 2340.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
+    {"id": "ev_r6", "t": 3000.0, "kind": "radar_contact", "actor": "ghost_1", "params": {"sigma": 50.0}},
     {"id": "ev_swap", "t": 2400.0, "kind": "identity_change", "actor": "spoofer_1", "params": {"new_display_id": "mmsi:999999999"}}
   ],
   "expected": {
@@ -56,7 +57,7 @@
     "min_crossings": 2,
     "dark_actor": "ghost_1",
     "dark_at_s": 300.0,
-    "sanctuary_entry_s": 480.0,
+    "sanctuary_entry_s": 740.0,
     "intrusion_fence": "central_bay_sanctuary",
     "reacquire_via": "radar_contact"
   }

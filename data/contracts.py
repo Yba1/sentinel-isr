@@ -139,7 +139,8 @@ class TrackState:
     vy: float
     # Position covariance [[pxx, pxy], [pyx, pyy]] for the uncertainty ellipse.
     p_pos: Tuple[Tuple[float, float], Tuple[float, float]]
-    status: str = "active"         # "active" | "coasting" | "dropped"
+    # Lifecycle vocabulary is tracker.assoc.Track's, projected verbatim.
+    status: str = "confirmed"      # "tentative" | "confirmed" | "coasting" | "dead"
     display_id: Optional[str] = None   # identity claim for the UI, never for association
     score: float = 0.0             # hypothesis log-likelihood / confidence
 

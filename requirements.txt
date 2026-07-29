@@ -1,4 +1,8 @@
+# Python 3.12 required: jaclang's runtime uses typing.override (3.12+).
 numpy>=1.26
 scipy>=1.11
 shapely>=2.0
 pytest>=8.0
+jaclang>=0.16
+byllm>=0.6
+litellm>=1.40

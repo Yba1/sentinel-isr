@@ -1,12 +1,17 @@
-"""Scenario pack loader: AIS ingest, geofences, synthetic actors, scripted events.
+"""Scenario pack loader: AIS ingest, geofences, synthetic actors. Data prep only.
 
 A scenario pack is a directory ``scenarios/<pack_id>/`` containing ``pack.json``
 plus its GeoJSON layers and a cached AIS window CSV. ``load_scenario(pack_id)``
 turns one into an in-memory :class:`Scenario`: fixed-interval frames of
 unlabelled :class:`~data.contracts.Measurement` objects plus ENU geofences.
 
-Everything scenario-shaped lives here. The tracker consumes plain Measurement
-frames and never learns that scenarios, events or ground truth exist.
+Boundary: this module does numerics and parsing only -- resampling,
+projection, noise, ground-truth bookkeeping. Scripted event *application*
+(``ais_off`` suppression, ``radar_contact`` injection, ``identity_change``)
+is graph mutation and lives in the ``ScenarioDriver`` walker
+(``jac/driver.jac``). Events are parsed here and attached to their frame, but
+every frame carries the *full* unsuppressed AIS picture; the driver decides
+what the tracker actually sees.
 
 Identity handling: MMSI is stripped at ingest into ``Scenario.ground_truth``
 keyed by ``meas_id``. Measurements are structurally incapable of carrying
@@ -28,7 +33,6 @@ import numpy as np
 
 from data.contracts import (
     AIS_SIGMA_M,
-    RADAR_SIGMA_M,
     Frame,
     Geofence,
     Measurement,
@@ -39,6 +43,7 @@ __all__ = [
     "Scenario",
     "load_scenario",
     "find_crossings",
+    "true_position_at",
     "lla_to_enu",
     "enu_to_lla",
     "SCENARIOS_DIR",
@@ -94,8 +99,9 @@ class Scenario:
     true_tracks: Dict[str, List[Tuple[float, float, float]]]
     events: List[ScenarioEvent]
     expected: Dict[str, Any] = field(default_factory=dict)
-    # identity_change events, ordered: (t, actor, new_display_id)
-    display_changes: List[Tuple[float, str, str]] = field(default_factory=list)
+    # meas_id counter continues where load stopped, so radar contacts injected
+    # by the ScenarioDriver walker get collision-free ids.
+    next_meas_seq: int = 0
 
     @property
     def n_frames(self) -> int:
@@ -109,13 +115,17 @@ class Scenario:
     def n_vessels(self) -> int:
         return len(self.true_tracks)
 
-    def display_id(self, actor: str, t: float) -> str:
-        """Display identity for the UI at time t, after any identity_change."""
-        current = actor
-        for et, a, new_id in self.display_changes:
-            if a == actor and et <= t:
-                current = new_id
-        return current
+    def mint_meas_id(self, actor: str) -> str:
+        """Reserve a fresh measurement id and bind its ground truth.
+
+        Called by the ScenarioDriver walker when it injects a radar contact;
+        keeping the counter and the ground-truth write here means the side
+        table stays the single place identity ever lives.
+        """
+        mid = f"m{self.next_meas_seq:06d}"
+        self.next_meas_seq += 1
+        self.ground_truth[mid] = actor
+        return mid
 
 
 def _resolve_pack(name_or_path: str) -> Tuple[Dict[str, Any], str]:
@@ -286,31 +296,15 @@ GENERATORS: Dict[str, Callable[..., List[Tuple[float, float, float]]]] = {
 }
 
 
-# ---------------------------------------------------------------- event schedule
+# ------------------------------------------------------------------ truth query
 
-def _suppression_windows(events: Sequence[ScenarioEvent], duration: float
-                         ) -> Dict[str, List[Tuple[float, float]]]:
-    """Per-actor [start, end) intervals during which AIS is suppressed."""
-    windows: Dict[str, List[Tuple[float, float]]] = {}
-    open_at: Dict[str, float] = {}
-    for ev in sorted(events, key=lambda e: e.t):
-        if ev.kind == "ais_off":
-            open_at.setdefault(ev.actor, ev.t)
-        elif ev.kind == "ais_on" and ev.actor in open_at:
-            windows.setdefault(ev.actor, []).append((open_at.pop(ev.actor), ev.t))
-    for actor, start in open_at.items():
-        windows.setdefault(actor, []).append((start, duration + 1.0))
-    return windows
+def true_position_at(track: Sequence[Tuple[float, float, float]], t: float
+                     ) -> Optional[Tuple[float, float]]:
+    """Linear interpolation along a resampled true track.
 
-
-def _is_suppressed(actor: str, t: float,
-                   windows: Dict[str, List[Tuple[float, float]]]) -> bool:
-    return any(a <= t < b for a, b in windows.get(actor, ()))
-
-
-def _true_position_at(track: Sequence[Tuple[float, float, float]], t: float
-                      ) -> Optional[Tuple[float, float]]:
-    """Linear interpolation along a resampled true track."""
+    Used by the ScenarioDriver walker to place injected radar contacts on the
+    actor's actual (possibly dark) position.
+    """
     if not track or t < track[0][0] or t > track[-1][0]:
         return None
     for i in range(len(track) - 1):
@@ -338,7 +332,6 @@ def load_scenario(name_or_path: str) -> Scenario:
 
     n_frames = int((t1 - t0) / interval) + 1
     frame_times = [k * interval for k in range(n_frames)]
-    duration = frame_times[-1]
 
     geofences = _load_geofences(pack, pack_dir, origin)
 
@@ -375,13 +368,10 @@ def load_scenario(name_or_path: str) -> Scenario:
         )
         for i, ev in enumerate(pack.get("events", []))
     ]
-    suppression = _suppression_windows(events, duration)
-    display_changes = sorted(
-        (ev.t, ev.actor, str(ev.params["new_display_id"]))
-        for ev in events if ev.kind == "identity_change"
-    )
-
     # --- assemble frames ------------------------------------------------------
+    # Every frame carries the FULL unsuppressed AIS picture. Applying events
+    # (suppression, radar injection, identity display swaps) is graph work and
+    # belongs to the ScenarioDriver walker in jac/driver.jac.
     rng = np.random.default_rng(int(pack.get("seed", 20260726)))
     ais_sigma = float(pack.get("ais_noise_sigma_m", AIS_SIGMA_M))
     ground_truth: Dict[str, str] = {}
@@ -406,8 +396,6 @@ def load_scenario(name_or_path: str) -> Scenario:
             track_pos[actor] = i
             if i >= len(track) or abs(track[i][0] - ft) > 1e-6:
                 continue
-            if _is_suppressed(actor, ft, suppression):
-                continue
             _, tx, ty = track[i]
             mid = f"m{next_meas:06d}"
             next_meas += 1
@@ -417,29 +405,6 @@ def load_scenario(name_or_path: str) -> Scenario:
                 source="ais", sigma=ais_sigma,
             ))
             ground_truth[mid] = actor
-
-        for ev in events_by_frame.get(k, ()):
-            if ev.kind != "radar_contact":
-                continue
-            if "x" in ev.params and "y" in ev.params:
-                px, py = float(ev.params["x"]), float(ev.params["y"])
-            else:
-                pos = _true_position_at(true_tracks.get(ev.actor, ()), ev.t)
-                if pos is None:
-                    raise ValueError(
-                        f"radar_contact {ev.event_id}: actor {ev.actor!r} has no "
-                        f"true position at t={ev.t}"
-                    )
-                px, py = pos
-            sigma = float(ev.params.get("sigma", RADAR_SIGMA_M))
-            mid = f"m{next_meas:06d}"
-            next_meas += 1
-            nx, ny = rng.normal(0.0, sigma, 2)
-            meas.append(Measurement(
-                meas_id=mid, t=ft, x=px + nx, y=py + ny,
-                source="radar", sigma=sigma,
-            ))
-            ground_truth[mid] = ev.actor
 
         frames.append(Frame(
             idx=k, t=ft,
@@ -458,7 +423,7 @@ def load_scenario(name_or_path: str) -> Scenario:
         true_tracks=true_tracks,
         events=events,
         expected=pack.get("expected", {}),
-        display_changes=display_changes,
+        next_meas_seq=next_meas,
     )
     _assert_no_identity_leak(scenario)
     return scenario
