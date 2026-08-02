@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
+from collections import OrderedDict
 
 import aiohttp
 
@@ -21,9 +23,10 @@ from data.maritime_context import maritime_context
 
 AISSTREAM_WS_URL = "wss://stream.aisstream.io/v0/stream"
 CONNECT_TIMEOUT_S = 8.0
-MAX_TRACKED = 4000  # global feed can be enormous; cap memory, evict oldest-touched
+MAX_TRACKED = int(os.getenv("AEGIS_MAX_ACTIVE_VESSELS", "20000"))
 DARK_AFTER_S = 45.0  # no fresh position report: render as a coasting contact
 MAX_HISTORY = 20
+MAX_TOMBSTONES = 50000
 
 # Busy maritime regions across every inhabited continent. A single world box
 # can deliver thousands of messages per second and starve the API server; these
@@ -55,8 +58,13 @@ class GlobalAisFeed:
         self.api_key = api_key
         self.vessels: dict[int, dict] = {}
         self.static_data: dict[int, dict] = {}
+        self.pinned_mmsi: int | None = None
         self.live = False
-        self._touch_order: list[int] = []
+        self._active_order: OrderedDict[int, None] = OrderedDict()
+        self._dark_mmsi: set[int] = set()
+        self.revision = 0
+        self._removed: list[tuple[int, int]] = []
+        self._delta_floor = 0
         self.connected = False
         self.messages_received = 0
         self.position_reports = 0
@@ -77,12 +85,20 @@ class GlobalAisFeed:
         )
 
     def _record(self, mmsi: int, fix: dict) -> None:
-        if mmsi not in self.vessels and len(self.vessels) >= MAX_TRACKED:
-            oldest = self._touch_order.pop(0)
-            self.vessels.pop(oldest, None)
-        if mmsi in self._touch_order:
-            self._touch_order.remove(mmsi)
-        self._touch_order.append(mmsi)
+        becoming_active = mmsi not in self._active_order
+        if becoming_active and len(self._active_order) >= MAX_TRACKED:
+            oldest = next(
+                (candidate for candidate in self._active_order
+                 if candidate != self.pinned_mmsi),
+                None,
+            )
+            if oldest is not None:
+                self._active_order.pop(oldest, None)
+                self.vessels.pop(oldest, None)
+                self._record_removal(oldest)
+        self._dark_mmsi.discard(mmsi)
+        self._active_order.pop(mmsi, None)
+        self._active_order[mmsi] = None
         was_positioned = mmsi in self.vessels
         previous = self.vessels.get(mmsi)
         if previous is None:
@@ -95,21 +111,45 @@ class GlobalAisFeed:
             if not history or history[-1] != point:
                 history.append(point)
                 history = history[-MAX_HISTORY:]
-        self.vessels[mmsi] = {
+        row = {
             **previous,
             **fix,
             "mmsi": mmsi,
             "history": history,
             "last_seen": time.time(),
         }
+        row.pop("_annotation_key", None)
+        row.pop("_annotation", None)
+        self.vessels[mmsi] = row
+        self._mark_changed(mmsi)
         self.live = True
+
+    def _mark_changed(self, mmsi: int) -> None:
+        self.revision += 1
+        if mmsi in self.vessels:
+            self.vessels[mmsi]["_revision"] = self.revision
+
+    def _record_removal(self, mmsi: int) -> None:
+        self.revision += 1
+        self._removed.append((self.revision, mmsi))
+        if len(self._removed) > MAX_TOMBSTONES:
+            dropped_revision, _ = self._removed.pop(0)
+            self._delta_floor = dropped_revision
+
+    def pin(self, mmsi: int | None) -> None:
+        """Protect one operator-selected contact from cache eviction."""
+        self.pinned_mmsi = mmsi
 
     def _record_static(self, mmsi: int, values: dict) -> None:
         if mmsi in self.vessels:
             previous = self.vessels[mmsi]
             if self._identity_changed(mmsi, previous, values):
                 self.identity_switches += 1
-            self.vessels[mmsi] = {**self.vessels[mmsi], **values}
+            row = {**self.vessels[mmsi], **values}
+            row.pop("_annotation_key", None)
+            row.pop("_annotation", None)
+            self.vessels[mmsi] = row
+            self._mark_changed(mmsi)
             return
         if len(self.static_data) >= MAX_TRACKED * 2:
             self.static_data.pop(next(iter(self.static_data)))
@@ -244,18 +284,61 @@ class GlobalAisFeed:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
 
-    def snapshot(self) -> list[dict]:
+    def _snapshot_rows(self, since: int = 0, only_mmsi: int | None = None) -> list[dict]:
         now = time.time()
         vessels = []
-        for fix in self.vessels.values():
+        items = (
+            [(only_mmsi, self.vessels[only_mmsi])]
+            if only_mmsi in self.vessels else []
+        ) if only_mmsi is not None else list(self.vessels.items())
+        for mmsi, fix in items:
             if "lat" not in fix or "lon" not in fix:
                 continue
-            row = dict(fix)
-            age_s = max(0.0, now - float(row.get("last_seen", now)))
+            age_s = max(0.0, now - float(fix.get("last_seen", now)))
+            dark = age_s >= DARK_AFTER_S
+            if dark and mmsi not in self._dark_mmsi:
+                self._dark_mmsi.add(mmsi)
+                self._active_order.pop(mmsi, None)
+                self._mark_changed(mmsi)
+            if since and int(fix.get("_revision", 0)) <= since:
+                continue
+            row = {
+                key: value
+                for key, value in fix.items()
+                if not key.startswith("_")
+            }
             row["age_s"] = round(age_s, 1)
-            row["dark"] = age_s >= DARK_AFTER_S
-            vessels.append(maritime_context().annotate(row))
+            row["dark"] = dark
+            annotation_key = (row["lat"], row["lon"], dark)
+            if fix.get("_annotation_key") != annotation_key:
+                fix["_annotation"] = maritime_context().annotate(row)
+                fix["_annotation_key"] = annotation_key
+            annotated = dict(fix["_annotation"])
+            annotated["age_s"] = row["age_s"]
+            annotated["dark"] = dark
+            vessels.append(annotated)
         return vessels
+
+    def snapshot(self) -> list[dict]:
+        return self._snapshot_rows()
+
+    def vessel_snapshot(self, mmsi: int) -> dict | None:
+        rows = self._snapshot_rows(only_mmsi=mmsi)
+        return rows[0] if rows else None
+
+    def snapshot_since(self, since: int = 0) -> dict:
+        full = since <= 0 or since < self._delta_floor or since > self.revision
+        effective_since = 0 if full else since
+        vessels = self._snapshot_rows(effective_since)
+        removed = [] if full else [
+            mmsi for revision, mmsi in self._removed if revision > since
+        ]
+        return {
+            "vessels": vessels,
+            "removed": removed,
+            "revision": self.revision,
+            "full": full,
+        }
 
     def status(self) -> dict:
         return {
@@ -265,21 +348,29 @@ class GlobalAisFeed:
             "position_reports": self.position_reports,
             "static_reports": self.static_reports,
             "identity_switches": self.identity_switches,
+            "pinned_mmsi": self.pinned_mmsi,
             "reconnects": self.reconnects,
             "last_message_at": self.last_message_at,
             "last_error": self.last_error,
             "regions": len(REGIONAL_BOXES),
             "max_tracked": MAX_TRACKED,
+            "active_contacts": len(self._active_order),
+            "dark_contacts": len(self._dark_mmsi),
+            "total_contacts": len(self.vessels),
         }
 
 
-def global_snapshot(feed: "GlobalAisFeed | None") -> dict:
+def global_snapshot(feed: "GlobalAisFeed | None", since: int = 0) -> dict:
     """Return real AIS contacts, or an explicit empty/offline state."""
     if feed is not None and feed.live and feed.vessels:
-        return {"live": True, "vessels": feed.snapshot(), "status": feed.status()}
+        delta = feed.snapshot_since(since)
+        return {"live": True, **delta, "status": feed.status()}
     return {
         "live": False,
         "vessels": [],
+        "removed": [],
+        "revision": feed.revision if feed is not None else 0,
+        "full": since <= 0,
         "status": {**feed.status(), "configured": True} if feed is not None else {
             "configured": False,
             "connected": False,

@@ -53,6 +53,7 @@ html, body {
 #eventlog {
   flex: 0 0 21%;
   min-width: 240px;
+  position: relative;
   background: var(--panel);
   border-right: 1px solid var(--border);
   display: flex;
@@ -121,6 +122,13 @@ html, body {
 
 #map-wrap { flex: 1 1 auto; min-width: 0; position: relative; }
 #map { position: absolute; inset: 0; background: #060a0e; }
+#map:focus,
+#map:focus-visible,
+.leaflet-container:focus,
+.leaflet-container:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
 
 .track-icon { pointer-events: auto; transition: transform 0.18s linear; }
 .track-triangle {
@@ -148,29 +156,48 @@ html, body {
   pointer-events: none;
 }
 
-.global-contact {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--amber);
-  border: 1px solid var(--amber);
-  box-shadow: 0 0 6px rgba(255, 176, 32, 0.75);
+.global-vessel-icon {
+  background: none !important;
+  border: 0 !important;
   cursor: pointer;
 }
-.global-contact.dark {
-  background: transparent;
-  border: 2px dashed var(--amber);
-  box-shadow: none;
-  animation: contact-coast 3s linear infinite;
+.global-vessel {
+  display: block;
+  width: 7px;
+  height: 10px;
+  margin: 2px auto;
+  overflow: visible;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.9));
 }
-.global-contact.warning { border-color: var(--amber); }
-.global-contact.critical {
-  background: var(--critical);
-  border-color: var(--critical);
-  box-shadow: 0 0 9px rgba(239, 68, 68, 0.9);
+#map.vessel-close-zoom .global-vessel {
+  width: 10px;
+  height: 14px;
+  margin: 0;
 }
-.global-contact.dark.critical { background: transparent; }
-@keyframes contact-coast { to { transform: rotate(360deg); } }
+.global-vessel path {
+  fill: rgba(255, 176, 32, 0.82);
+  stroke: #ffb020;
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.global-vessel.dark path {
+  fill: rgba(255, 176, 32, 0.08);
+  stroke-width: 1.5;
+  stroke-dasharray: 2.5 1.5;
+}
+.global-vessel.critical path {
+  fill: rgba(239, 68, 68, 0.82);
+  stroke: #ef4444;
+}
+.global-vessel.dark.critical path {
+  fill: rgba(239, 68, 68, 0.08);
+}
+.global-vessel.stale {
+  opacity: 0.45;
+  filter: grayscale(1);
+}
 
 .trajectory-panel {
   position: absolute;
@@ -321,11 +348,20 @@ html, body {
   flex: 0 0 26%;
   min-width: 300px;
   max-width: 420px;
+  position: relative;
   background: var(--panel);
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+#eventlog .trajectory-panel {
+  inset: 0;
+  width: 100%;
+  max-height: 100%;
+  border-radius: 0;
+  border-width: 0 1px 0 0;
+  box-shadow: none;
 }
 
 .tabbar { display: flex; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
@@ -489,6 +525,62 @@ body.live-mode #btn-retract {
 /* --------------------------------------------------------------- leaflet */
 
 .leaflet-container { background: #060a0e; }
+.aegis-zoom-control {
+  display: grid;
+  gap: 6px;
+  margin: 14px 0 0 14px;
+  padding: 6px;
+  background: rgba(9, 14, 20, 0.9);
+  border: 1px solid rgba(94, 200, 216, 0.35);
+  border-radius: 12px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(8px);
+}
+.aegis-zoom-button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: #111923;
+  color: var(--cyan);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+.aegis-zoom-button:hover {
+  background: #172532;
+  border-color: rgba(94, 200, 216, 0.55);
+}
+.aegis-zoom-button:active { transform: scale(0.94); }
+.aegis-zoom-button span,
+.aegis-zoom-button:first-child span::after {
+  display: block;
+  width: 14px;
+  height: 2px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.aegis-zoom-button span { position: relative; }
+.aegis-zoom-button:first-child span::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: rotate(90deg);
+}
+.leaflet-control-attribution {
+  margin: 0 8px 7px 0 !important;
+  padding: 3px 7px !important;
+  border: 1px solid rgba(124, 139, 161, 0.22);
+  border-radius: 6px;
+  background: rgba(6, 10, 14, 0.78) !important;
+  color: #718096 !important;
+  font: 9px/1.25 "IBM Plex Sans", sans-serif !important;
+  backdrop-filter: blur(6px);
+}
+.leaflet-control-attribution a { color: #8ba2b8 !important; }
 .leaflet-popup-content-wrapper { background: #0f151c; color: var(--text); }
 .leaflet-popup-tip { background: #0f151c; }
 .leaflet-tooltip {

@@ -13,6 +13,9 @@ const MAX_LOG_LINES = 400;
 
 const els = {
   map: document.getElementById("map"),
+  mapWrap: document.getElementById("map-wrap"),
+  eventlog: document.getElementById("eventlog"),
+  sidepanel: document.getElementById("sidepanel"),
   log: document.getElementById("log-entries"),
   idCount: document.getElementById("id-switch-count"),
   statsTracks: document.getElementById("stats-tracks"),
@@ -46,6 +49,8 @@ const els = {
   trajectoryGfw: document.getElementById("trajectory-gfw"),
   trajectoryRisk: document.getElementById("trajectory-risk"),
   trajectoryOptions: document.getElementById("trajectory-options"),
+  trajectoryHeading: document.getElementById("trajectory-heading"),
+  trajectoryNote: document.getElementById("trajectory-note"),
 };
 
 const state = {
@@ -61,14 +66,18 @@ const state = {
   packId: null,
   globalLayerOn: false,
   globalLive: false, // true once a real aisstream.io fix has arrived
-  globalVessels: [],
+  globalVessels: new Map(),
+  globalRevision: 0,
   globalStatus: {},
   selectedMmsi: null,
   selectedVessel: null,
-  trajectoryMode: "triple",
+  trajectoryMode: "all",
   trajectoryAnimationFrame: null,
+  trajectoryRenderId: 0,
+  predictionCache: new Map(),
   gfwCache: new Map(),
   localView: null,
+  preSelectionView: null,
   lastFrameRisk: null,
 };
 
@@ -78,10 +87,59 @@ const globalMarkers = new Map(); // mmsi -> marker
 // ------------------------------------------------------------------- map
 
 const map = L.map(els.map, {
-  zoomControl: true,
+  zoomControl: false,
   attributionControl: true,
   worldCopyJump: true,
 }).setView([20, 0], 3);
+
+const AegisZoomControl = L.Control.extend({
+  options: { position: "topleft" },
+  onAdd(targetMap) {
+    const control = L.DomUtil.create("div", "aegis-zoom-control");
+    const zoomIn = L.DomUtil.create("button", "aegis-zoom-button", control);
+    const zoomOut = L.DomUtil.create("button", "aegis-zoom-button", control);
+    zoomIn.type = "button";
+    zoomOut.type = "button";
+    zoomIn.title = "Zoom in";
+    zoomOut.title = "Zoom out";
+    zoomIn.setAttribute("aria-label", "Zoom in");
+    zoomOut.setAttribute("aria-label", "Zoom out");
+    zoomIn.innerHTML = '<span aria-hidden="true"></span>';
+    zoomOut.innerHTML = '<span aria-hidden="true"></span>';
+    L.DomEvent.disableClickPropagation(control);
+    L.DomEvent.on(zoomIn, "click", () => targetMap.zoomIn());
+    L.DomEvent.on(zoomOut, "click", () => targetMap.zoomOut());
+    return control;
+  },
+});
+new AegisZoomControl().addTo(map);
+map.attributionControl.setPrefix(false);
+
+const BoatCanvasRenderer = L.Canvas.extend({
+  _updateCircle(layer) {
+    if (!layer.options.boatShape) {
+      return L.Canvas.prototype._updateCircle.call(this, layer);
+    }
+    if (!this._drawing || layer._empty()) return;
+    const point = layer._point;
+    const size = Number(layer.options.boatSize) || 5;
+    const bearing = (Number(layer.options.boatBearing) || 0) * Math.PI / 180;
+    const ctx = this._ctx;
+    ctx.save();
+    ctx.translate(point.x, point.y);
+    ctx.rotate(bearing);
+    ctx.beginPath();
+    ctx.moveTo(0, -size * 1.45);
+    ctx.lineTo(size * 0.72, size * 0.35);
+    ctx.lineTo(size * 0.6, size * 1.25);
+    ctx.lineTo(0, size * 0.9);
+    ctx.lineTo(-size * 0.6, size * 1.25);
+    ctx.lineTo(-size * 0.72, size * 0.35);
+    ctx.closePath();
+    ctx.restore();
+    this._fillStroke(ctx, layer);
+  },
+});
 
 L.tileLayer(
   // CARTO retired the "dark_matter" path (404s now); "dark_all" is the
@@ -90,7 +148,9 @@ L.tileLayer(
   {
     subdomains: "abcd",
     maxZoom: 19,
-    attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · ' +
+      '&copy; <a href="https://carto.com/attributions">CARTO</a>',
   }
 ).addTo(map);
 
@@ -98,12 +158,21 @@ const zonesLayer = L.featureGroup().addTo(map); // needs getBounds(); plain laye
 const localLayer = L.layerGroup().addTo(map);
 const globalLayer = L.layerGroup();
 const globalProjectionLayer = L.layerGroup().addTo(globalLayer);
-const contextReferenceLayer = L.layerGroup();
-const globalRenderer = L.canvas({ padding: 0.5, tolerance: 8 });
-map.createPane("contextPane");
-map.getPane("contextPane").style.zIndex = 350;
-map.getPane("contextPane").style.pointerEvents = "none";
-const contextRenderer = L.canvas({ padding: 0.5, pane: "contextPane" });
+map.createPane("vesselPane");
+map.getPane("vesselPane").style.zIndex = 390;
+map.getPane("vesselPane").style.transition = "opacity 140ms ease";
+const globalRenderer = new BoatCanvasRenderer({
+  padding: 0.5,
+  tolerance: 8,
+  pane: "vesselPane",
+});
+map.on("zoomstart", () => {
+  map.getPane("vesselPane").style.opacity = "0";
+});
+map.on("zoomend", () => {
+  globalRenderer._update();
+  map.getPane("vesselPane").style.opacity = "1";
+});
 
 function drawZones(zones) {
   zonesLayer.clearLayers();
@@ -124,36 +193,6 @@ function drawZones(zones) {
   if (zones && zones.length && !state.globalLayerOn) {
     state.zonesDrawn = true;
     map.fitBounds(zonesLayer.getBounds().pad(6), { animate: false });
-  }
-}
-
-async function loadContextLayers() {
-  try {
-    const data = await getJson("/api/context/layers");
-    for (const layer of data.layers || []) {
-      L.geoJSON(layer.geojson, {
-        pane: "contextPane",
-        renderer: contextRenderer,
-        pointToLayer: (_feature, latlng) => L.circleMarker(latlng, {
-          renderer: contextRenderer,
-          radius: 6,
-          color: layer.style.color,
-          weight: 2,
-          fillColor: layer.style.color,
-          fillOpacity: 0.35,
-        }),
-        style: {
-          ...layer.style,
-          renderer: contextRenderer,
-          opacity: 0.75,
-          interactive: false,
-        },
-      })
-        .addTo(contextReferenceLayer);
-    }
-    if (!map.hasLayer(contextReferenceLayer)) contextReferenceLayer.addTo(map);
-  } catch (err) {
-    console.warn("Reference layers unavailable", err);
   }
 }
 
@@ -291,12 +330,28 @@ function renderLogEntries(entries, { replace }) {
 
 // ----------------------------------------------------------------- stats
 
+function globalContactCounts() {
+  const status = state.globalStatus;
+  if (Number.isFinite(Number(status.total_contacts))) {
+    return {
+      active: Number(status.active_contacts) || 0,
+      dark: Number(status.dark_contacts) || 0,
+      total: Number(status.total_contacts) || 0,
+    };
+  }
+  let dark = 0;
+  for (const vessel of state.globalVessels.values()) {
+    if (vessel.dark) dark += 1;
+  }
+  return { active: state.globalVessels.size - dark, dark, total: state.globalVessels.size };
+}
+
 function updateStats(msg) {
   if (state.globalLayerOn) {
-    const dark = state.globalVessels.filter((v) => v.dark).length;
-    els.statsTracks.textContent = state.globalVessels.length - dark;
-    els.statsDark.textContent = dark;
-    els.statsTotal.textContent = state.globalVessels.length;
+    const counts = globalContactCounts();
+    els.statsTracks.textContent = counts.active;
+    els.statsDark.textContent = counts.dark;
+    els.statsTotal.textContent = counts.total;
     els.idCount.textContent = state.globalStatus.identity_switches ?? 0;
     return;
   }
@@ -512,46 +567,20 @@ document.querySelector('[data-tab="jtms"]').addEventListener("click", () => { if
 
 // ----------------------------------------------------------- global layer
 
-function globalMarkerStyle(v) {
+function globalMarkerStyle(v, stale = false) {
   const critical = (v.risk?.items || []).some((item) => item.severity === "critical");
-  const color = critical ? "#ef4444" : "#ffb020";
+  const color = stale ? "#94a3b8" : critical ? "#ef4444" : "#ffb020";
   return {
+    boatShape: true,
+    boatSize: 5,
+    boatBearing: Number(v.course) || 0,
     color,
-    weight: v.dark ? 1.5 : 0.75,
-    opacity: 0.95,
+    weight: v.dark ? 1.5 : 0.8,
+    opacity: stale ? 0.45 : 0.95,
     fillColor: color,
-    fillOpacity: v.dark ? 0 : 0.78,
-    dashArray: v.dark ? "3 3" : null,
+    fillOpacity: v.dark ? 0.08 : 0.78,
+    dashArray: v.dark ? "3 2" : null,
   };
-}
-
-function projectedPoint(lat, lon, bearingDeg, distanceNm) {
-  const radiusNm = 3440.065;
-  const angular = distanceNm / radiusNm;
-  const bearing = bearingDeg * Math.PI / 180;
-  const lat1 = lat * Math.PI / 180;
-  const lon1 = lon * Math.PI / 180;
-  const lat2 = Math.asin(
-    Math.sin(lat1) * Math.cos(angular) +
-    Math.cos(lat1) * Math.sin(angular) * Math.cos(bearing)
-  );
-  const lon2 = lon1 + Math.atan2(
-    Math.sin(bearing) * Math.sin(angular) * Math.cos(lat1),
-    Math.cos(angular) - Math.sin(lat1) * Math.sin(lat2)
-  );
-  return [lat2 * 180 / Math.PI, lon2 * 180 / Math.PI];
-}
-
-function trajectoryScenarios(v) {
-  const course = Number(v.course) || 0;
-  const speed = Math.max(0, Number(v.speed_kn) || 0);
-  const runNm = speed * 0.5;
-  const scenarios = [
-    { label: "Maintain course", bearing: course, distance: runNm, color: "#2dd4bf" },
-    { label: "Turn +35°", bearing: course + 35, distance: runNm, color: "#5ec8d8" },
-    { label: "Turn −35°", bearing: course - 35, distance: runNm, color: "#a78bfa" },
-  ];
-  return state.trajectoryMode === "single" ? scenarios.slice(0, 1) : scenarios;
 }
 
 function stopTrajectoryAnimation() {
@@ -565,28 +594,55 @@ function startTrajectoryAnimation(runners) {
   stopTrajectoryAnimation();
   const startedAt = performance.now();
   const durationMs = 4800;
+  const travelEnd = 0.88;
+  const fadeStart = 0.8;
   const animate = (now) => {
     const phase = ((now - startedAt) % durationMs) / durationMs;
-    const progress = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
+    const progress = Math.min(1, phase / travelEnd);
     const eased = progress * progress * (3 - 2 * progress);
+    const opacity = phase < fadeStart
+      ? 1
+      : Math.max(0, (travelEnd - phase) / (travelEnd - fadeStart));
     for (const runner of runners) {
+      const scaled = eased * (runner.path.length - 1);
+      const segment = Math.min(runner.path.length - 2, Math.floor(scaled));
+      const fraction = scaled - segment;
+      const from = runner.path[segment];
+      const to = runner.path[segment + 1];
       runner.marker.setLatLng([
-        runner.start[0] + (runner.end[0] - runner.start[0]) * eased,
-        runner.start[1] + (runner.end[1] - runner.start[1]) * eased,
+        from[0] + (to[0] - from[0]) * fraction,
+        from[1] + (to[1] - from[1]) * fraction,
       ]);
+      runner.marker.setStyle({ opacity, fillOpacity: opacity });
     }
     state.trajectoryAnimationFrame = requestAnimationFrame(animate);
   };
   state.trajectoryAnimationFrame = requestAnimationFrame(animate);
 }
 
-function hideTrajectory() {
+function hideTrajectory({ restoreView = true } = {}) {
   stopTrajectoryAnimation();
+  state.trajectoryRenderId += 1;
+  const returnView = state.preSelectionView;
+  state.preSelectionView = null;
+  if (state.selectedMmsi !== null) {
+    postJson("/api/global/pin", { mmsi: null }).catch(() => {});
+  }
   state.selectedMmsi = null;
   state.selectedVessel = null;
   globalProjectionLayer.clearLayers();
   els.trajectoryPanel.classList.add("hidden");
+  if (els.trajectoryPanel.parentElement !== els.mapWrap) {
+    els.mapWrap.appendChild(els.trajectoryPanel);
+  }
   if (state.lastFrameRisk) renderRiskPanel(state.lastFrameRisk, "Current frame");
+  if (restoreView && returnView && state.globalLayerOn) {
+    map.flyTo(returnView.center, returnView.zoom, {
+      animate: true,
+      duration: 1.1,
+      easeLinearity: 0.2,
+    });
+  }
 }
 
 function renderGfwIdentity(data) {
@@ -654,13 +710,22 @@ function refreshSelectedVessel(v) {
   renderRiskPanel(risk, v.name || `MMSI ${v.mmsi}`);
 }
 
-function showTrajectory(v) {
+async function showTrajectory(v) {
+  const renderId = ++state.trajectoryRenderId;
+  if (v.dark && state.selectedMmsi === null) {
+    const center = map.getCenter();
+    state.preSelectionView = {
+      center: [center.lat, center.lng],
+      zoom: map.getZoom(),
+    };
+  }
+  if (state.selectedMmsi !== v.mmsi) {
+    postJson("/api/global/pin", { mmsi: v.mmsi }).catch(() => {});
+  }
   state.selectedMmsi = v.mmsi;
   stopTrajectoryAnimation();
   globalProjectionLayer.clearLayers();
   const start = [Number(v.lat), Number(v.lon)];
-  const scenarios = trajectoryScenarios(v);
-  const age = Math.max(0, Number(v.age_s) || 0);
   const context = v.context || {};
   refreshSelectedVessel(v);
 
@@ -686,8 +751,68 @@ function showTrajectory(v) {
     ? `<div class="trajectory-heading">Reference-data matches</div>${contextLines.map((line) => `<div>${line}</div>`).join("")}`
     : `<div class="context-clear">No bundled reference-data match at this position.</div>`;
   loadGfwIdentity(v.mmsi);
+  if (els.trajectoryPanel.parentElement !== els.eventlog) {
+    els.eventlog.appendChild(els.trajectoryPanel);
+  }
+  els.trajectoryPanel.classList.remove("hidden");
+  const modeSwitch = els.trajectoryPanel.querySelector(".trajectory-mode-switch");
+  modeSwitch.classList.toggle("hidden", !v.dark);
+  if (!v.dark) {
+    els.trajectoryHeading.textContent = "AIS transmitting · live contact";
+    els.trajectoryOptions.innerHTML =
+      `<div class="trajectory-option"><span class="trajectory-swatch"></span>` +
+      `<span>Current reported position</span><span class="trajectory-distance">LIVE</span></div>`;
+    els.trajectoryNote.textContent =
+      "No predicted trajectory is shown while this vessel is actively transmitting AIS.";
+    return;
+  }
+  els.trajectoryHeading.textContent = "Calculating Monte Carlo branches…";
   els.trajectoryOptions.innerHTML = "";
+  els.trajectoryNote.textContent =
+    "Using the last AIS position, speed, heading, turn rate, track history, silence duration, and available coastline constraints.";
+  const targetZoom = Math.max(map.getZoom(), 11);
+  const mapCenterPoint = L.point(map.getSize().x / 2, map.getSize().y / 2);
+  const vesselPoint = map.latLngToContainerPoint(start);
+  const needsCameraMove =
+    map.getZoom() < targetZoom || vesselPoint.distanceTo(mapCenterPoint) > 30;
+  let cameraReady = Promise.resolve();
+  if (needsCameraMove) {
+    map.flyTo(start, targetZoom, {
+      animate: true,
+      duration: 1.1,
+      easeLinearity: 0.2,
+    });
+    cameraReady = new Promise((resolve) => window.setTimeout(resolve, 1150));
+  }
+
+  const cacheKey = `${v.mmsi}:${v.last_seen}`;
+  let prediction = state.predictionCache.get(cacheKey);
+  try {
+    if (!prediction) {
+      prediction = await getJson(`/api/global/${encodeURIComponent(v.mmsi)}/prediction`);
+      state.predictionCache.set(cacheKey, prediction);
+    }
+  } catch (_err) {
+    if (state.trajectoryRenderId === renderId) {
+      els.trajectoryHeading.textContent = "Prediction unavailable";
+      els.trajectoryNote.textContent = "The dark-contact model could not be calculated.";
+    }
+    return;
+  }
+  await cameraReady;
+  if (state.trajectoryRenderId !== renderId || state.selectedMmsi !== v.mmsi) return;
+
+  const colors = ["#2dd4bf", "#5ec8d8", "#a78bfa", "#f59e0b", "#f472b6",
+    "#60a5fa", "#34d399", "#fb7185", "#c084fc", "#facc15"];
+  const allScenarios = prediction.scenarios || [];
+  const scenarios = state.trajectoryMode === "single"
+    ? allScenarios.slice(0, 1)
+    : allScenarios;
   const runners = [];
+  els.trajectoryHeading.textContent =
+    `${prediction.samples} Monte Carlo runs · ${allScenarios.length} branches · ` +
+    `${prediction.horizon_minutes} minute horizon`;
+  els.trajectoryOptions.innerHTML = "";
 
   if ((v.history || []).length > 1) {
     L.polyline(v.history, {
@@ -697,11 +822,12 @@ function showTrajectory(v) {
       interactive: false,
     }).addTo(globalProjectionLayer);
   }
-
   scenarios.forEach((scenario, index) => {
-    const end = projectedPoint(start[0], start[1], scenario.bearing, scenario.distance);
-    L.polyline([start, end], {
-      color: scenario.color,
+    const color = colors[index % colors.length];
+    const path = scenario.path;
+    const end = path[path.length - 1];
+    L.polyline(path, {
+      color,
       weight: 2,
       opacity: 0.9,
       dashArray: "6 5",
@@ -709,11 +835,11 @@ function showTrajectory(v) {
       className: `trajectory-path trajectory-path-${index}`,
     }).addTo(globalProjectionLayer);
     L.circle(end, {
-      radius: 450 + age * 8,
-      color: scenario.color,
+      radius: Number(scenario.uncertainty_radius_m) || 100,
+      color,
       weight: 1,
       opacity: 0.75,
-      fillColor: scenario.color,
+      fillColor: color,
       fillOpacity: 0.08,
       dashArray: "3 4",
       interactive: false,
@@ -721,26 +847,37 @@ function showTrajectory(v) {
     }).addTo(globalProjectionLayer);
     const runner = L.circleMarker(start, {
       radius: 4,
-      color: scenario.color,
+      color,
       weight: 2,
       fillColor: "#ffffff",
       fillOpacity: 1,
       interactive: false,
       className: "trajectory-runner",
     }).addTo(globalProjectionLayer);
-    runners.push({ marker: runner, start, end });
+    runners.push({ marker: runner, path });
 
     const row = document.createElement("div");
     row.className = "trajectory-option";
     row.innerHTML =
-      `<span class="trajectory-swatch" style="background:${scenario.color}"></span>` +
-      `<span>${escapeHtml(scenario.label)}</span>` +
-      `<span class="trajectory-distance">${scenario.distance.toFixed(1)} nm</span>`;
+      `<span class="trajectory-swatch" style="background:${color}"></span>` +
+      `<span>Branch ${index + 1} · ${(Number(scenario.probability) * 100).toFixed(1)}%</span>` +
+      `<span class="trajectory-distance">${Number(scenario.distance_nm).toFixed(1)} nm</span>`;
     els.trajectoryOptions.appendChild(row);
   });
+  const unavailable = Object.entries(prediction.signal_availability || {})
+    .filter(([, available]) => !available)
+    .map(([name]) => name.replaceAll("_", " "));
+  const drivers = prediction.uncertainty_drivers || [];
+  els.trajectoryNote.textContent =
+    `${drivers.length ? `Uncertainty increased by: ${drivers.join(", ")}. ` : ""}` +
+    `${unavailable.length ? `Unavailable: ${unavailable.join(", ")}.` : ""}`;
   startTrajectoryAnimation(runners);
-  els.trajectoryPanel.classList.remove("hidden");
-  if (map.getZoom() < 9) map.flyTo(start, 9, { animate: true, duration: 0.8 });
+  if (scenarios.length) {
+    const bounds = L.latLngBounds(scenarios.flatMap((scenario) => scenario.path));
+    if (bounds.isValid() && !map.getBounds().contains(bounds)) {
+      map.flyToBounds(bounds.pad(0.25), { maxZoom: targetZoom, duration: 0.7 });
+    }
+  }
 }
 
 function applyGlobalFix(v) {
@@ -748,7 +885,7 @@ function applyGlobalFix(v) {
   if (!m) {
     m = L.circleMarker([v.lat, v.lon], {
       renderer: globalRenderer,
-      radius: 3,
+      radius: 8,
       ...globalMarkerStyle(v),
       interactive: true,
       bubblingMouseEvents: false,
@@ -760,6 +897,7 @@ function applyGlobalFix(v) {
     m.setLatLng([v.lat, v.lon]);
     m.setStyle(globalMarkerStyle(v));
   }
+  m._stale = false;
   m._fix = v;
   m._dark = !!v.dark;
   m._riskHigh = Number(v.risk?.high_usd || 0);
@@ -773,7 +911,11 @@ function applyGlobalFix(v) {
     `${Number(v.speed_kn || 0).toFixed(1)} kn${v.dark ? " · DARK / COASTING" : ""}` +
     `${contextFlags.length ? ` · ${contextFlags.join(" · ")}` : ""}`
   );
-  if (state.selectedMmsi === v.mmsi) refreshSelectedVessel(v);
+  if (state.selectedMmsi === v.mmsi) {
+    const resumedAis = state.selectedVessel?.dark && !v.dark;
+    if (resumedAis) showTrajectory(v);
+    else refreshSelectedVessel(v);
+  }
 }
 
 els.trajectoryClose.addEventListener("click", hideTrajectory);
@@ -789,7 +931,7 @@ for (const button of document.querySelectorAll(".trajectory-mode")) {
 
 function globalStatusText() {
   if (state.globalLive) {
-    return `LIVE AISSTREAM · ${state.globalVessels.length} contacts`;
+    return `LIVE AISSTREAM · ${globalContactCounts().total} contacts`;
   }
   if (!state.globalStatus.configured) {
     return "LIVE AIS DISABLED · ADD AISSTREAM_API_KEY TO .env";
@@ -809,10 +951,11 @@ function renderLiveRail(status) {
       `<div class="log-line log-zone"><span class="tag">[CONTEXT]</span>NOAA · NGA · Natural Earth · cables · OFAC</div>` +
       `<div class="log-line log-log"><span class="tag">[ENRICH]</span>Global Fishing Watch on contact selection</div>`;
   }
+  const counts = globalContactCounts();
   document.getElementById("live-rail-contacts").textContent =
-    `${(state.globalVessels.length - state.globalVessels.filter((v) => v.dark).length).toLocaleString()} active · ` +
-    `${state.globalVessels.filter((v) => v.dark).length.toLocaleString()} dark · ` +
-    `${state.globalVessels.length.toLocaleString()} total`;
+    `${counts.active.toLocaleString()} active · ` +
+    `${counts.dark.toLocaleString()} dark · ` +
+    `${counts.total.toLocaleString()} total`;
   document.getElementById("live-rail-messages").textContent =
     `${Number(status.position_reports || 0).toLocaleString()} positions · ` +
     `${Number(status.static_reports || 0).toLocaleString()} static/voyage`;
@@ -827,11 +970,12 @@ function setGlobalLayer(on) {
   if (on) {
     state.localView = { center: map.getCenter(), zoom: map.getZoom() };
     map.removeLayer(localLayer);
+    map.removeLayer(zonesLayer);
     globalLayer.addTo(map);
-    const dark = state.globalVessels.filter((v) => v.dark).length;
-    els.statsTracks.textContent = state.globalVessels.length - dark;
-    els.statsDark.textContent = dark;
-    els.statsTotal.textContent = state.globalVessels.length;
+    const counts = globalContactCounts();
+    els.statsTracks.textContent = counts.active;
+    els.statsDark.textContent = counts.dark;
+    els.statsTotal.textContent = counts.total;
     els.idCount.textContent = state.globalStatus.identity_switches ?? 0;
     els.assocBadge.textContent = "AIS LIVE";
     els.assocBadge.classList.remove("naive");
@@ -839,9 +983,10 @@ function setGlobalLayer(on) {
     els.globalBadge.classList.remove("hidden");
     els.globalBadge.textContent = globalStatusText();
   } else {
-    hideTrajectory();
+    hideTrajectory({ restoreView: false });
     map.removeLayer(globalLayer);
     localLayer.addTo(map);
+    zonesLayer.addTo(map);
     setAssocUi(state.assocMode);
     if (state.localView) {
       map.setView(state.localView.center, state.localView.zoom, { animate: false });
@@ -855,31 +1000,44 @@ els.btnGlobalLayer.addEventListener("click", () => setGlobalLayer(!state.globalL
 let globalPollTimer = null;
 async function pollGlobal() {
   try {
-    const data = await getJson("/api/global");
+    const data = await getJson(`/api/global?since=${state.globalRevision}`);
     state.globalLive = !!data.live;
     state.globalStatus = data.status || {};
-    state.globalVessels = data.vessels || [];
-    const seen = new Set();
-    for (const v of state.globalVessels) {
-      seen.add(v.mmsi);
+    if (data.full) {
+      for (const marker of globalMarkers.values()) globalLayer.removeLayer(marker);
+      globalMarkers.clear();
+      state.globalVessels.clear();
+    }
+    for (const v of data.vessels || []) {
+      state.globalVessels.set(v.mmsi, v);
       applyGlobalFix(v);
     }
-    for (const [mmsi, marker] of globalMarkers) {
-      if (seen.has(mmsi)) continue;
+    for (const mmsi of data.removed || []) {
+      const marker = globalMarkers.get(mmsi);
+      if (!marker) continue;
+      if (state.selectedMmsi === mmsi) {
+        marker._stale = true;
+        marker.setStyle(globalMarkerStyle(marker._fix || {}, true));
+        marker.setTooltipContent(
+          `${escapeHtml(marker._fix?.name || `MMSI ${mmsi}`)} · selected · awaiting feed refresh`
+        );
+        continue;
+      }
       globalLayer.removeLayer(marker);
       globalMarkers.delete(mmsi);
-      if (state.selectedMmsi === mmsi) hideTrajectory();
+      state.globalVessels.delete(mmsi);
     }
+    state.globalRevision = Number(data.revision) || state.globalRevision;
     if (state.globalLayerOn) {
-      const dark = state.globalVessels.filter((v) => v.dark).length;
-      els.statsTracks.textContent = state.globalVessels.length - dark;
-      els.statsDark.textContent = dark;
-      els.statsTotal.textContent = state.globalVessels.length;
+      const counts = globalContactCounts();
+      els.statsTracks.textContent = counts.active;
+      els.statsDark.textContent = counts.dark;
+      els.statsTotal.textContent = counts.total;
       const status = data.status || {};
       els.idCount.textContent = status.identity_switches ?? 0;
       renderLiveRail(status);
       els.globalBadge.textContent = state.globalLive
-        ? `LIVE AISSTREAM · ${state.globalVessels.length} contacts · ` +
+        ? `LIVE AISSTREAM · ${counts.total.toLocaleString()} contacts · ` +
           `${Number(status.position_reports || 0).toLocaleString()} positions · ` +
           `${Number(status.static_reports || 0).toLocaleString()} static/voyage · ` +
           `${Number(status.identity_switches || 0).toLocaleString()} identity changes · ` +
@@ -987,4 +1145,3 @@ document.addEventListener("keydown", (ev) => {
 setGlobalLayer(true);
 connect();
 jtmsReset().then(loadBrief);
-loadContextLayers();

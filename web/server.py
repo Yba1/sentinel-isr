@@ -45,6 +45,7 @@ from aiohttp import web, WSMsgType
 
 from data.scenario import load_scenario
 from data.global_ais import GlobalAisFeed, global_snapshot
+from data.dark_prediction import predict_dark_vessel
 from data.global_fishing_watch import GlobalFishingWatchClient
 from data.maritime_context import maritime_context
 from aegis.graph import build_mission
@@ -385,7 +386,43 @@ def build_app(cache: dict) -> web.Application:
         })
 
     async def api_global(request: web.Request) -> web.Response:
-        return web.json_response(global_snapshot(app["global_feed"]))
+        try:
+            since = max(0, int(request.query.get("since", "0")))
+        except ValueError:
+            return web.json_response({"error": "since must be an integer"}, status=400)
+        return web.json_response(global_snapshot(app["global_feed"], since=since))
+
+    async def api_global_pin(request: web.Request) -> web.Response:
+        feed = app["global_feed"]
+        if feed is None:
+            return web.json_response({"pinned_mmsi": None, "live": False})
+        body = await _body(request)
+        raw_mmsi = body.get("mmsi")
+        if raw_mmsi is None:
+            feed.pin(None)
+        else:
+            mmsi = int(raw_mmsi)
+            if not 100_000_000 <= mmsi <= 999_999_999:
+                return web.json_response({"error": "mmsi must be 9 digits"}, status=400)
+            feed.pin(mmsi)
+        return web.json_response({"pinned_mmsi": feed.pinned_mmsi, "live": feed.live})
+
+    async def api_dark_prediction(request: web.Request) -> web.Response:
+        feed = app["global_feed"]
+        mmsi = int(request.match_info["mmsi"])
+        if feed is None or mmsi not in feed.vessels:
+            return web.json_response({"error": "vessel not found"}, status=404)
+        vessel = feed.vessel_snapshot(mmsi)
+        if vessel is None:
+            return web.json_response({"error": "vessel not found"}, status=404)
+        if not vessel.get("dark"):
+            return web.json_response(
+                {"error": "trajectory prediction is only available after AIS silence"},
+                status=409,
+            )
+        loop = asyncio.get_running_loop()
+        prediction = await loop.run_in_executor(None, predict_dark_vessel, vessel)
+        return web.json_response(prediction)
 
     async def api_context_layers(request: web.Request) -> web.Response:
         return web.json_response({"layers": maritime_context().layer_payloads()})
@@ -406,6 +443,8 @@ def build_app(cache: dict) -> web.Application:
         })
 
     app.router.add_get("/api/global", api_global)
+    app.router.add_post("/api/global/pin", api_global_pin)
+    app.router.add_get(r"/api/global/{mmsi:\d{9}}/prediction", api_dark_prediction)
     app.router.add_get("/api/context/layers", api_context_layers)
     app.router.add_get(r"/api/global/{mmsi:\d{9}}/gfw", api_gfw_identity)
     app.router.add_get("/api/scenario", api_scenario)

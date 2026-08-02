@@ -147,6 +147,17 @@ class MaritimeContext:
                 return {**index[value], "match_basis": basis}
         return None
 
+    def terrain_status(self, lat: float, lon: float) -> dict[str, bool]:
+        """Report land intersection only where bundled coastline coverage exists."""
+        available = -126.0 <= lon <= -120.5 and 34.5 <= lat <= 38.5
+        return {
+            "available": available,
+            "on_land": (
+                bool(self._prepared["coastline"].covers(Point(lon, lat)))
+                if available else False
+            ),
+        }
+
     def annotate(self, vessel: dict[str, Any]) -> dict[str, Any]:
         row = dict(vessel)
         lat = float(row.get("lat", 0.0))

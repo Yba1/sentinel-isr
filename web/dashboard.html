@@ -4,10 +4,34 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Aegis · Maritime Safety & Financial Risk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;600;700&family=Space+Mono&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="dashboard.css" />
+<link rel="stylesheet" href="onboarding.css" />
 </head>
-<body>
+<body class="intro-active">
+<section id="aegis-intro" class="aegis-intro" aria-label="Welcome to Aegis">
+  <div class="intro-door intro-door-left" aria-hidden="true"></div>
+  <div class="intro-door intro-door-right" aria-hidden="true"></div>
+  <div class="intro-seam" aria-hidden="true"></div>
+
+  <div class="intro-copy">
+    <p class="intro-kicker">Save the seas with</p>
+    <h1 class="intro-title">Aegis</h1>
+  </div>
+
+  <div id="intro-earth" class="intro-earth" aria-hidden="true">
+    <div class="intro-earth-fallback"></div>
+    <canvas id="intro-earth-canvas"></canvas>
+  </div>
+
+  <button id="intro-skip" class="intro-skip" type="button" aria-label="Skip introduction">
+    Skip intro
+  </button>
+</section>
+
 <div id="app">
 
   <div id="banner" class="hidden"></div>
@@ -38,14 +62,13 @@
         <div id="trajectory-gfw" class="trajectory-context"></div>
         <div id="trajectory-risk" class="trajectory-context"></div>
         <div class="trajectory-mode-switch" role="group" aria-label="Trajectory alternatives">
-          <button class="trajectory-mode active" data-trajectory-mode="triple">3 paths</button>
-          <button class="trajectory-mode" data-trajectory-mode="single">1 path</button>
+          <button class="trajectory-mode active" data-trajectory-mode="all">All branches</button>
+          <button class="trajectory-mode" data-trajectory-mode="single">Most likely</button>
         </div>
-        <div class="trajectory-heading">Projected paths · 30 minute horizon</div>
+        <div id="trajectory-heading" class="trajectory-heading">Monte Carlo prediction</div>
         <div id="trajectory-options"></div>
-        <p class="trajectory-note">
-          Kinematic projections only—no satellite or RF feed confirmed.
-          Ellipses widen with elapsed time.
+        <p id="trajectory-note" class="trajectory-note">
+          Calculated only after AIS silence. Unavailable sensor inputs are reported, never invented.
         </p>
       </section>
       <div id="stats-overlay">
@@ -115,6 +138,7 @@
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="onboarding.js"></script>
 <script src="dashboard.js"></script>
 </body>
 </html>

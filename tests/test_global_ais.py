@@ -111,6 +111,59 @@ def test_live_identity_switch_count_uses_observed_static_changes():
     assert feed.status()["identity_switches"] == 2
 
 
+def test_selected_contact_is_not_evicted_at_capacity(monkeypatch):
+    monkeypatch.setattr(global_ais, "MAX_TRACKED", 2)
+    feed = global_ais.GlobalAisFeed("not-a-real-key")
+    feed._record(111111111, {"lat": 1.0, "lon": 1.0})
+    feed._record(222222222, {"lat": 2.0, "lon": 2.0})
+    feed.pin(111111111)
+
+    feed._record(333333333, {"lat": 3.0, "lon": 3.0})
+
+    assert set(feed.vessels) == {111111111, 333333333}
+    assert feed.status()["pinned_mmsi"] == 111111111
+    feed.pin(None)
+    assert feed.status()["pinned_mmsi"] is None
+
+
+def test_dark_contacts_survive_active_capacity_until_ais_resumes(monkeypatch):
+    now = [1_700_000_000.0]
+    monkeypatch.setattr(global_ais, "MAX_TRACKED", 2)
+    monkeypatch.setattr(global_ais.time, "time", lambda: now[0])
+    feed = global_ais.GlobalAisFeed("not-a-real-key")
+    feed._record(111111111, {"lat": 1.0, "lon": 1.0})
+    feed._record(222222222, {"lat": 2.0, "lon": 2.0})
+    now[0] += global_ais.DARK_AFTER_S + 1
+    feed.snapshot()
+
+    feed._record(333333333, {"lat": 3.0, "lon": 3.0})
+    feed._record(444444444, {"lat": 4.0, "lon": 4.0})
+
+    assert set(feed.vessels) == {111111111, 222222222, 333333333, 444444444}
+    assert feed.status()["dark_contacts"] == 2
+
+    feed._record(111111111, {"lat": 1.1, "lon": 1.1})
+
+    assert 111111111 in feed.vessels
+    assert 111111111 not in feed._dark_mmsi
+    assert len(feed._active_order) == 2
+
+
+def test_incremental_snapshot_returns_only_changed_contacts():
+    feed = global_ais.GlobalAisFeed("not-a-real-key")
+    feed._record(111111111, {"lat": 1.0, "lon": 1.0})
+    feed._record(222222222, {"lat": 2.0, "lon": 2.0})
+    initial = feed.snapshot_since()
+
+    feed._record(111111111, {"lat": 1.1, "lon": 1.1})
+    delta = feed.snapshot_since(initial["revision"])
+
+    assert initial["full"] is True
+    assert delta["full"] is False
+    assert [row["mmsi"] for row in delta["vessels"]] == [111111111]
+    assert delta["removed"] == []
+
+
 def test_position_reports_build_bounded_history():
     feed = global_ais.GlobalAisFeed("not-a-real-key")
     for index in range(global_ais.MAX_HISTORY + 5):
