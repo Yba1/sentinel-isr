@@ -824,8 +824,8 @@ def test_pack_result_counts_sum_to_the_number_of_checks() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# the Jac orchestration seam: CHECKERS / PACK_CHECKS are plain, callable, and
-# read live from tracker.eval by the Jac side (not captured once at import).
+# The registries remain plain, callable Python objects and are read live by
+# evaluate_pack, preserving the monkeypatch contract.
 # --------------------------------------------------------------------------- #
 
 
@@ -841,27 +841,28 @@ def test_pack_checks_tuple_values_are_all_plain_callables() -> None:
         assert callable(pack_check)
 
 
-def test_jac_eval_module_is_importable_and_backs_the_public_api() -> None:
-    """The orchestration genuinely lives in jac/eval.jac, not a Python shadow."""
-    import jaclang  # noqa: F401  registers the .jac meta importer
-    from jac.eval import evaluate_pack_core, discover_packs as jac_discover_packs
+def test_eval_public_api_is_native_python() -> None:
+    """Discovery and evaluation are implemented directly in tracker.eval."""
+    import tracker.eval as ev
 
-    assert callable(evaluate_pack_core)
-    # tracker.eval's discover_packs is a thin wrapper over the same Jac function.
-    assert discover_packs(None) == jac_discover_packs(None)
+    assert ev.discover_packs.__module__ == "tracker.eval"
+    assert ev.evaluate_pack.__module__ == "tracker.eval"
+    result = ev.evaluate_pack({"id": "native", "expected": {"dark_actor": "a"},
+                               "synthetic_actors": [{"actor_id": "a"}]})
+    assert result.pack_id == "native"
+    assert outcomes(result)["dark_actor"] == PASS
 
 
 def test_two_not_built_checkers_are_independent_closures() -> None:
     """Each not-built key gets its own capability message, not a shared one."""
     assert CHECKERS["ofac_hit"] is not CHECKERS["relink_same_track"]
-    # CHECKERS values are the raw Jac checker functions: each returns a plain
-    # dict (key/outcome/detail/expected/actual/marginal), not a CheckResult --
-    # tracker.eval.evaluate_pack is what wraps that into the dataclass.
     a = CHECKERS["ofac_hit"](True, {}, None)
     b = CHECKERS["relink_same_track"](True, {}, None)
-    assert a["detail"] != b["detail"]
-    assert "OFAC" in a["detail"]
-    assert "relink" in b["detail"].lower()
+    assert isinstance(a, CheckResult)
+    assert isinstance(b, CheckResult)
+    assert a.detail != b.detail
+    assert "OFAC" in a.detail
+    assert "relink" in b.detail.lower()
 
 
 # =========================================================================== #

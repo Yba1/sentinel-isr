@@ -3,7 +3,7 @@
 The full scenario is materialised once by ``load_scenario`` (all frames in
 memory), so ``seek`` is an index assignment and ``reset`` never re-parses.
 The engine yields plain :class:`~data.contracts.Frame` objects; whoever
-consumes them (the Jac walker layer, a test, a benchmark) decides what a
+consumes them (the Aegis pipeline, a test, a benchmark) decides what a
 frame means. Speed only changes the sleep between yields, never the frames.
 """
 

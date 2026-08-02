@@ -1156,7 +1156,7 @@ def test_end_to_end_dark_vessel_reacquisition():
     Coast a real filter with AIS off, watch the ellipse grow, then feed it the
     radar plot that actually belongs to the vessel and check the emitted event.
     """
-    track, kf = _dark_track_from_coast(track_id=MMSI_DEMO, label="MV Sentinel")
+    track, kf = _dark_track_from_coast(track_id=MMSI_DEMO, label="MV Demo")
 
     a, b, theta = ellipse_axes(track.pos_cov)
     assert a >= b and math.isfinite(theta)

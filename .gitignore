@@ -1,6 +1,5 @@
 __pycache__/
 *.py[cod]
-.jac/
 .pytest_cache/
 .venv/
 venv/
@@ -11,10 +10,6 @@ env/
 .idea/
 .DS_Store
 
-# Jac build/state junk. `.jac/` matches at any depth, so it covers both the repo-root
-# .jac/data/ session db and jac/.jac/cache/. It does NOT touch jac/*.jac source files.
-.jac/
-
 # Raw downloads are fetched, not committed (~400 MB MarineCadastre pull). data/*.py is
 # the replay layer and IS committed; extracted per-pack AIS windows
 # (scenarios/*/ais_window.csv, ~1 MB) are committed too so the demo runs offline.
@@ -22,4 +17,3 @@ env/
 # have silently dropped data/*.py and geo/*.geojson on the next `git add -A` -- do not
 # reintroduce a bare `data/` or `geo/` line here.
 /data/raw/
-/geo/

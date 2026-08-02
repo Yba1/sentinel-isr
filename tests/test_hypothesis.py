@@ -1,29 +1,13 @@
-"""Phase 3 acceptance tests: ambiguity detection (Python) and the hypothesis
-lifecycle (Jac).
-
-Two halves, deliberately separate:
-
-* ``tracker.ambiguity`` is plain Python and needs no toolchain, so those tests
-  are unmarked and run everywhere.
-* ``jac/hypothesis.jac`` needs jaclang on a Python 3.12 interpreter, so those
-  tests are marked ``@pytest.mark.jac`` and can be excluded with
-  ``-m "not jac"``.
-
-The Jac half drives the real .jac module in-process (``import jaclang`` installs
-a meta importer that can import a .jac file as a module), not a subprocess, so
-the assertions are on live graph state and the real emitted log lines rather
-than on scraped stdout.
-"""
+"""Phase 3 acceptance tests for ambiguity detection and hypothesis lifecycle."""
 
 from __future__ import annotations
 
 import math
-import os
-import sys
 
 import numpy as np
 import pytest
 
+import aegis.hypothesis as hypothesis
 from tracker.ambiguity import (
     AMBIGUITY_DELTA_NATS,
     AmbiguityReport,
@@ -33,9 +17,6 @@ from tracker.ambiguity import (
 )
 from tracker.assoc import DEFAULT_PARAMS, Track, associate_global, big_cost
 from tracker.kalman import CVKalman
-
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_JAC_DIR = os.path.join(_REPO_ROOT, "jac")
 
 # Radar-grade measurement noise, 50 m 1-sigma.
 R_RADAR = np.diag([2500.0, 2500.0])
@@ -75,22 +56,7 @@ def separated_frame() -> tuple[list[Track], np.ndarray]:
 
 @pytest.fixture(scope="module")
 def hyp():
-    """The compiled jac/hypothesis.jac, imported as a Python module.
-
-    NOTE: the module name is ``hypothesis``, which collides with the
-    property-testing library of the same name. That library is not installed in
-    this environment (checked), so putting ``jac/`` on sys.path is safe here; if
-    it is ever added as a dependency this fixture must switch to an
-    explicit-location import.
-    """
-    pytest.importorskip("jaclang", reason="jaclang (Python 3.12+) not installed")
-    import jaclang  # noqa: F401  -- installs the .jac meta importer
-
-    if _JAC_DIR not in sys.path:
-        sys.path.insert(0, _JAC_DIR)
-    import hypothesis as jac_hypothesis
-
-    return jac_hypothesis
+    return hypothesis
 
 
 def weights_sum(mod) -> float:
@@ -263,10 +229,9 @@ def test_truth_ids_do_not_influence_the_verdict():
 
 
 # ===========================================================================
-# jac/hypothesis.jac
+# aegis/hypothesis.py
 # ===========================================================================
 
-@pytest.mark.jac
 def test_reset_starts_clean_and_normalized(hyp):
     hyp.reset(1)
     assert hyp.live_ids() == ["h_00"]
@@ -279,7 +244,6 @@ def test_reset_starts_clean_and_normalized(hyp):
     assert weights_sum(hyp) == pytest.approx(1.0, abs=1e-9)
 
 
-@pytest.mark.jac
 def test_visible_fork_then_collapse_back_to_one(hyp):
     """Acceptance: an ambiguous crossing forks, both hypotheses live for three
     frames, then the N-scan window closes and prunes back to one."""
@@ -298,7 +262,6 @@ def test_visible_fork_then_collapse_back_to_one(hyp):
     assert weights_sum(hyp) == pytest.approx(1.0, abs=1e-9)
 
 
-@pytest.mark.jac
 def test_log_has_a_split_line_then_a_pruned_line_in_the_exact_format(hyp):
     hyp.reset(1)
     hyp.run_frame(True, 0.61, 0.39)
@@ -318,7 +281,6 @@ def test_log_has_a_split_line_then_a_pruned_line_in_the_exact_format(hyp):
         assert all(ord(ch) < 128 for ch in line)
 
 
-@pytest.mark.jac
 def test_split_weights_are_formatted_to_two_decimals(hyp):
     """0.6 must print as (0.60), not (0.6) -- a 0.61/0.39 split cannot tell the
     difference, so assert on weights that can."""
@@ -327,7 +289,6 @@ def test_split_weights_are_formatted_to_two_decimals(hyp):
     assert hyp.get_log()[0] == "[Hypothesis] split h_00 -> h_00a (0.60) / h_00b (0.40)"
 
 
-@pytest.mark.jac
 def test_nscan_collapse_fires_at_depth_3(hyp):
     hyp.reset(1)
     for frame in range(1, 4):
@@ -341,7 +302,6 @@ def test_nscan_collapse_fires_at_depth_3(hyp):
     assert any(ln.startswith("[Hypothesis] pruned") for ln in hyp.get_log())
 
 
-@pytest.mark.jac
 def test_collapse_keeps_the_highest_weight_leaf(hyp):
     hyp.reset(1)
     hyp.run_frame(True, 0.3, 0.7)     # the "b" child is the heavy one here
@@ -351,7 +311,6 @@ def test_collapse_keeps_the_highest_weight_leaf(hyp):
     assert "[Hypothesis] pruned h_00a" in hyp.get_log()
 
 
-@pytest.mark.jac
 def test_weight_kill_removes_anything_below_one_percent(hyp):
     hyp.reset(1)
     hyp.run_frame(True, 0.995, 0.005)          # 0.005 < WEIGHT_FLOOR
@@ -362,7 +321,6 @@ def test_weight_kill_removes_anything_below_one_percent(hyp):
     assert weights_sum(hyp) == pytest.approx(1.0, abs=1e-9)
 
 
-@pytest.mark.jac
 def test_weight_kill_never_empties_the_tree(hyp):
     """Even a pathological split leaves one survivor."""
     hyp.reset(1)
@@ -373,7 +331,6 @@ def test_weight_kill_never_empties_the_tree(hyp):
         assert weights_sum(hyp) == pytest.approx(1.0, abs=1e-9)
 
 
-@pytest.mark.jac
 def test_hard_cap_holds_at_eight_across_a_full_replay(hyp):
     """Acceptance: drive enough forks to try to breach the cap, every frame."""
     assert hyp.MAX_LIVE == 8
@@ -391,7 +348,6 @@ def test_hard_cap_holds_at_eight_across_a_full_replay(hyp):
     assert seen_at_cap, "the cap never actually bound; the test proves nothing"
 
 
-@pytest.mark.jac
 def test_cap_kills_the_lowest_weight_first(hyp):
     hyp.reset(6)
     hyp.run_frame(True, 0.6, 0.4, True)            # 12 leaves -> cap to 8
@@ -406,7 +362,6 @@ def test_cap_kills_the_lowest_weight_first(hyp):
     assert all(pid not in hyp.live_ids() for pid in pruned)
 
 
-@pytest.mark.jac
 def test_live_weights_sum_to_one_after_every_operation(hyp):
     """Frame boundaries only -- by construction the sum is NOT 1 between the
     steps of maintain(); that is what the final normalize is for."""
@@ -431,7 +386,6 @@ def test_live_weights_sum_to_one_after_every_operation(hyp):
             assert w >= hyp.WEIGHT_FLOOR or hyp.live_count() == 1
 
 
-@pytest.mark.jac
 def test_unambiguous_frame_ages_without_branching(hyp):
     hyp.reset(1)
     before = hyp.live_ids()
@@ -441,9 +395,8 @@ def test_unambiguous_frame_ages_without_branching(hyp):
     assert hyp.get_log() == []               # no lifecycle event to report
 
 
-@pytest.mark.jac
 def test_ambiguity_report_drives_the_fork_end_to_end(hyp):
-    """The Python detector and the Jac lifecycle, wired together the way the
+    """The detector and hypothesis lifecycle, wired together the way the
     tracker wires them: numbers out of numpy, structure into the graph."""
     tracks, zs = crossing_frame()
     rep = detect_ambiguity(tracks, zs, R_RADAR)

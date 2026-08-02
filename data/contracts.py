@@ -3,7 +3,7 @@
 Ownership
 ---------
 - ``Measurement``, ``Frame``, ``Geofence``, ``ScenarioEvent`` are produced by the
-  data layer (this package) and consumed by the tracker / Jac walkers.
+  data layer (this package) and consumed by the tracker and Aegis pipeline.
 - ``TrackState`` is produced by the tracker layer.
 - ``FrameDelta`` is the *only* thing the frontend ever receives. The frontend is
   dumb: it renders FrameDeltas and computes nothing.

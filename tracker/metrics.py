@@ -1,4 +1,4 @@
-"""Identity-switch scoring for the Sentinel-ISR maritime tracker.
+"""Identity-switch scoring for the Aegis maritime tracker.
 
 The tracker itself never sees vessel identity (MMSI). Identity is held out and
 used only here, on the scoring side, so that the numbers this module produces

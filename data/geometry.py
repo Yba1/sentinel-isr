@@ -1,8 +1,8 @@
-"""Numeric geometry primitives for the Jac layer. Deliberately Python.
+"""Numeric geometry primitives for the Aegis runtime.
 
 The boundary rule: eigendecomposition, shapely predicates and anything else
 that is linear algebra stays here; what to *do* with the results (colors,
-polygons in FrameDeltas, alert decisions) is graph logic and lives in Jac.
+polygons in FrameDeltas, alert decisions) lives in the orchestration layer.
 """
 
 from __future__ import annotations

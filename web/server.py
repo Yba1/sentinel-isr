@@ -1,8 +1,6 @@
-"""Sentinel-ISR web server: precomputed replay, REST transport, WS stream.
+"""Aegis web server: precomputed replay, REST transport, WS stream.
 
-Not part of the frontend deliverable (web/index.html, app.js, style.css) --
-this is the minimum backend those files need to exist against. It runs the
-exact Jac pipeline (jac/main.jac's walker sequence) once at startup, caches
+It runs the pure-Python runtime pipeline once at startup, caches
 every frame's render-ready delta, and then just plays the cache back. That is
 what makes "scrubbing instant" true: a seek is an array index, never a
 re-run of the tracker.
@@ -45,15 +43,16 @@ _load_dotenv(REPO_ROOT / ".env")
 import numpy as np
 from aiohttp import web, WSMsgType
 
-import jaclang  # noqa: F401  -- registers the .jac import hook
-
 from data.scenario import load_scenario
 from data.global_ais import GlobalAisFeed, global_snapshot
-from jac.graph import build_mission
-from jac.main import run_frame_scored
-from jac import jtms
-from jac.brief import panel_payload
-from jac.fusion import assoc_provenance as jac_main_assoc_source
+from data.dark_prediction import predict_dark_vessel
+from data.global_fishing_watch import GlobalFishingWatchClient
+from data.maritime_context import maritime_context
+from aegis.graph import build_mission
+from aegis.main import run_frame_scored
+from aegis.fusion import assoc_provenance as main_assoc_source
+from aegis import jtms
+from aegis.brief import panel_payload
 from tracker.metrics import TrackingMetrics
 from tracker import eval as tracker_eval
 
@@ -67,12 +66,12 @@ KNOWN_PACKS = ["s01_dark_in_sanctuary", "s02_synthetic_demo", "s02_mmsi_spoof", 
 # --------------------------------------------------------------------- precompute
 
 def precompute(pack_id: str, max_frames: int = -1, assoc_mode: str = "global") -> dict:
-    """Run the full Jac pipeline once and cache everything the server needs.
+    """Run the full Aegis pipeline once and cache everything the server needs.
 
     Returns a dict with the per-frame delta cache plus flat, prefix-summed
     log/alert history so a seek can slice "everything up to here" in O(1)
     lookup + O(k) slice, never by re-deriving it. `assoc_mode` ("global" or
-    "greedy") selects the stage-1 associator -- see jac/fusion.jac.
+    "greedy") selects the stage-1 associator.
     """
     scenario = load_scenario(pack_id)
     mission = build_mission(scenario)
@@ -117,8 +116,8 @@ def precompute(pack_id: str, max_frames: int = -1, assoc_mode: str = "global") -
 # ------------------------------------------------------------------------ jtms
 
 def _jtms_state(flipped: list | None = None) -> dict:
-    """JSON-serialisable snapshot of the live MMSI-spoof JTMS demo graph
-    (jac/jtms.jac): every Fact's believed flag, every Conclusion's status and
+    """JSON-serialisable snapshot of the live MMSI-spoof evidence graph:
+    every Fact's believed flag, every Conclusion's status and
     a fresh brief_for() sentence, and (if this call followed a
     retract/reinstate) which conclusion ids just flipped."""
     facts = {fid: {"label": jtms.FACTS[fid].label, "believed": jtms.fact_believed(fid)}
@@ -178,7 +177,7 @@ def build_app(cache: dict) -> web.Application:
             "history_alerts": alerts,
             "pack_id": cache["pack_id"],
             "assoc_mode": cache["assoc_mode"],
-            "assoc_source": jac_main_assoc_source(cache["assoc_mode"]),
+            "assoc_source": main_assoc_source(cache["assoc_mode"]),
             "total_frames": len(cache["frames"]),
             "zones": cache["zones"],
             **app["state"],
@@ -216,6 +215,8 @@ def build_app(cache: dict) -> web.Application:
 
     api_key = os.environ.get("AISSTREAM_API_KEY", "")
     app["global_feed"] = GlobalAisFeed(api_key) if api_key else None
+    gfw_token = os.environ.get("GFW_API_TOKEN", "")
+    app["gfw_client"] = GlobalFishingWatchClient(gfw_token) if gfw_token else None
 
     async def start_global_feed(app: web.Application) -> None:
         if app["global_feed"] is not None:
@@ -286,7 +287,7 @@ def build_app(cache: dict) -> web.Application:
         """Switch the active scenario pack and/or association mode. Blocks
         while the (pack_id, assoc_mode) combination is precomputed for the
         first time -- there is no partial/streaming precompute -- then it is
-        cached for every later switch back. Real Jac pipeline run, same as
+        cached for every later switch back. Real runtime pipeline run, same as
         startup; s01's 326-vessel window can take a couple of minutes the
         first time, this is not a demo shortcut."""
         body = await _body(request)
@@ -308,7 +309,7 @@ def build_app(cache: dict) -> web.Application:
             "type": "init",
             "pack_id": cache["pack_id"],
             "assoc_mode": cache["assoc_mode"],
-            "assoc_source": jac_main_assoc_source(cache["assoc_mode"]),
+            "assoc_source": main_assoc_source(cache["assoc_mode"]),
             "frame_interval_s": cache["frame_interval_s"],
             "total_frames": len(cache["frames"]),
             "zones": cache["zones"],
@@ -385,9 +386,67 @@ def build_app(cache: dict) -> web.Application:
         })
 
     async def api_global(request: web.Request) -> web.Response:
-        return web.json_response(global_snapshot(app["global_feed"]))
+        try:
+            since = max(0, int(request.query.get("since", "0")))
+        except ValueError:
+            return web.json_response({"error": "since must be an integer"}, status=400)
+        return web.json_response(global_snapshot(app["global_feed"], since=since))
+
+    async def api_global_pin(request: web.Request) -> web.Response:
+        feed = app["global_feed"]
+        if feed is None:
+            return web.json_response({"pinned_mmsi": None, "live": False})
+        body = await _body(request)
+        raw_mmsi = body.get("mmsi")
+        if raw_mmsi is None:
+            feed.pin(None)
+        else:
+            mmsi = int(raw_mmsi)
+            if not 100_000_000 <= mmsi <= 999_999_999:
+                return web.json_response({"error": "mmsi must be 9 digits"}, status=400)
+            feed.pin(mmsi)
+        return web.json_response({"pinned_mmsi": feed.pinned_mmsi, "live": feed.live})
+
+    async def api_dark_prediction(request: web.Request) -> web.Response:
+        feed = app["global_feed"]
+        mmsi = int(request.match_info["mmsi"])
+        if feed is None or mmsi not in feed.vessels:
+            return web.json_response({"error": "vessel not found"}, status=404)
+        vessel = feed.vessel_snapshot(mmsi)
+        if vessel is None:
+            return web.json_response({"error": "vessel not found"}, status=404)
+        if not vessel.get("dark"):
+            return web.json_response(
+                {"error": "trajectory prediction is only available after AIS silence"},
+                status=409,
+            )
+        loop = asyncio.get_running_loop()
+        prediction = await loop.run_in_executor(None, predict_dark_vessel, vessel)
+        return web.json_response(prediction)
+
+    async def api_context_layers(request: web.Request) -> web.Response:
+        return web.json_response({"layers": maritime_context().layer_payloads()})
+
+    async def api_gfw_identity(request: web.Request) -> web.Response:
+        mmsi = int(request.match_info["mmsi"])
+        client = app["gfw_client"]
+        if client is None:
+            return web.json_response({
+                "configured": False,
+                "matched": False,
+                "mmsi": mmsi,
+                "source": "Global Fishing Watch",
+            })
+        return web.json_response({
+            "configured": True,
+            **await client.vessel_identity(mmsi),
+        })
 
     app.router.add_get("/api/global", api_global)
+    app.router.add_post("/api/global/pin", api_global_pin)
+    app.router.add_get(r"/api/global/{mmsi:\d{9}}/prediction", api_dark_prediction)
+    app.router.add_get("/api/context/layers", api_context_layers)
+    app.router.add_get(r"/api/global/{mmsi:\d{9}}/gfw", api_gfw_identity)
     app.router.add_get("/api/scenario", api_scenario)
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/play", api_play)
@@ -415,7 +474,7 @@ def build_app(cache: dict) -> web.Application:
             "type": "init",
             "pack_id": cache["pack_id"],
             "assoc_mode": cache["assoc_mode"],
-            "assoc_source": jac_main_assoc_source(cache["assoc_mode"]),
+            "assoc_source": main_assoc_source(cache["assoc_mode"]),
             "frame_interval_s": cache["frame_interval_s"],
             "total_frames": len(cache["frames"]),
             "zones": cache["zones"],
@@ -446,7 +505,7 @@ def build_app(cache: dict) -> web.Application:
     # ---------------------------------------------------------------- static
 
     web_dir = Path(__file__).resolve().parent
-    app.router.add_get("/", lambda r: web.FileResponse(web_dir / "index.html"))
+    app.router.add_get("/", lambda r: web.FileResponse(web_dir / "dashboard.html"))
     app.router.add_get("/dashboard", lambda r: web.FileResponse(web_dir / "dashboard.html"))
     app.router.add_static("/", web_dir, show_index=False)
 
@@ -463,12 +522,12 @@ async def _body(request: web.Request) -> dict:
 
 
 def main() -> None:
-    # Matches jac/main.jac's default: synthetic pack for a sub-second boot.
-    # SENTINEL_PACK=s01_dark_in_sanctuary exercises the acceptance criteria
+    # Synthetic pack is the default for a sub-second boot.
+    # AEGIS_PACK=s01_dark_in_sanctuary exercises the acceptance criteria
     # (40+ live tracks) but costs ~2-3 minutes of precompute at startup --
     # that's the whole tracker pipeline running once, not a demo-time cost.
-    pack_id = os.environ.get("SENTINEL_PACK", "s02_synthetic_demo")
-    max_frames = int(os.environ.get("SENTINEL_FRAMES", "-1"))
+    pack_id = os.environ.get("AEGIS_PACK", "s02_synthetic_demo")
+    max_frames = int(os.environ.get("AEGIS_FRAMES", "-1"))
     port = int(os.environ.get("PORT", "8765"))
 
     print(f"[server] precomputing {pack_id} ...", flush=True)

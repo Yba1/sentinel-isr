@@ -307,7 +307,7 @@ def detect_ambiguity(
 
     Returns the winning and runner-up assignments, their total costs, the nats
     margin between them, and the two normalized hypothesis weights the caller
-    should hand to the Jac hypothesis manager on a fork.
+    should hand to the Aegis hypothesis manager on a fork.
 
     Degenerate frames (no tracks, no measurements, or a best solution that
     assigns nothing at all) report ``ambiguous=False`` with an infinite margin:

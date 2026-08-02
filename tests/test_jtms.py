@@ -1,70 +1,28 @@
-"""Phase 5 acceptance tests for jac/jtms.jac -- the justification-based truth
-maintenance system (JTMS).
+"""Acceptance tests for the pure-Python justification-based TMS.
 
-Scope note: this file tests ``jac/jtms.jac`` -- the IN/OUT justification
-propagation, retract()/reinstate(), explain() and brief_for(). There is no
-Python-side kernel here to separate out (see the module docstring's WHAT LIVES
-HERE AND WHY): a JTMS is nothing but a dependency graph and a propagation rule,
-so the whole feature is Jac, and this whole file exercises it directly.
-
-Marked ``@pytest.mark.jac`` because it needs jaclang on a Python 3.12
-interpreter, matching tests/test_hypothesis.py and tests/test_geofence_jac.py;
-deselect with ``-m "not jac"``. The module is driven in-process via jaclang's
-meta importer (``import jaclang`` then ``import jtms``), so assertions read
-live graph state and the real dicts returned by explain(), not scraped stdout.
-
-ASCII only in every assertion string, matching this repo's convention
-(jac/hypothesis.jac, jac/geofence.jac): "->", never a unicode arrow.
+ASCII only in every assertion string: ``->``, never a Unicode arrow.
 """
 
 from __future__ import annotations
 
-import os
-import sys
-
 import pytest
 
-pytestmark = pytest.mark.jac
-
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_JAC_DIR = os.path.join(_REPO_ROOT, "jac")
+from aegis import jtms
 
 
 # ---------------------------------------------------------------------------
 # Fixture
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="module")
-def jtms_mod():
-    """The compiled jac/jtms.jac, imported as a Python module."""
-    pytest.importorskip("jaclang", reason="jaclang (Python 3.12+) not installed")
-    import jaclang  # noqa: F401  -- installs the .jac meta importer
-
-    if _JAC_DIR not in sys.path:
-        sys.path.insert(0, _JAC_DIR)
-    import jtms as jac_jtms
-
-    return jac_jtms
-
-
 @pytest.fixture
-def jt(jtms_mod):
-    """A clean graph for each test.
-
-    reset() per test is mandatory, not hygiene: the Jac globals live for the
-    whole pytest process and `root` is persisted across `jac run` invocations,
-    so without it every test would see its predecessors' facts/conclusions
-    (see jac/jtms.jac's reset() docstring, same discipline as geofence.jac's
-    `mon` fixture and hypothesis.jac's per-test reset()).
-    """
-    jtms_mod.reset()
-    return jtms_mod
+def jt():
+    """Return a clean evidence graph for each test."""
+    jtms.reset()
+    return jtms
 
 
 def build_mmsi_spoof(jt) -> None:
-    """Build the mmsi-spoof fixture via the shared builder jac/jtms.jac exposes
-    (`build_mmsi_spoof_demo`), so this test file and the module's own `jac run`
-    demo entry block cannot drift apart."""
+    """Build the shared MMSI-spoof fixture."""
     jt.build_mmsi_spoof_demo()
 
 

@@ -7,7 +7,7 @@ minutes ago; an unattributed radar detection has just appeared -- is it the same
 vessel, and how sure are we?* This module owns the geometry of the growing
 uncertainty region and the probability arithmetic of re-attribution. It holds no
 state, reads no files, and knows nothing about zones, severities or the
-hypothesis graph -- all of that lives in the Jac layer.
+hypothesis graph -- all of that lives in the Aegis orchestration layer.
 
 Coasting semantics
 ------------------

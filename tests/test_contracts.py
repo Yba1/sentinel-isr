@@ -4,7 +4,7 @@ This module is the single source of truth for the three divergent geofence
 contracts, so the tests here are written as *pins on the merge*: each one names
 the shape it is defending. Nothing in this file imports shapely or touches disk,
 which is itself part of the contract (contracts.py must stay importable from the
-Jac layer and the loader without pulling in geometry).
+pipeline and loader without pulling in geometry).
 """
 
 from dataclasses import dataclass
@@ -47,8 +47,7 @@ EPOCH_20240615_0600Z = 1718431200.0
 
 
 def test_no_shapely_dependency():
-    """contracts.py must stay importable without the geometry stack: the Jac
-    layer and the loader import it precisely because it is dependency-light."""
+    """contracts.py must stay importable without the geometry stack."""
     import ast
 
     import tracker.contracts as contracts
@@ -82,40 +81,26 @@ def test_contract_error_is_a_value_error():
     assert issubclass(ContractError, ValueError)
 
 
-def test_contracts_is_a_thin_shim_backed_by_the_jac_module():
-    """tracker.contracts must be a genuine re-export of jac/contracts.jac, not
-    a cosmetic duplicate that happens to sit unused. Prove the function
-    objects tracker.contracts hands out actually live in the .jac module."""
-    import jaclang  # noqa: F401  -- registers the .jac import hook
-
-    import jac.contracts as jac_contracts
+def test_contracts_public_api_is_native_python():
+    """The public contract surface is implemented directly in this module."""
     import tracker.contracts as py_contracts
 
-    assert jac_contracts.__file__.endswith(".jac")
-    # Same underlying callables -- not re-implemented, re-exported.
-    assert py_contracts.normalize_kind is jac_contracts.normalize_kind
-    assert py_contracts.parse_origin is jac_contracts.parse_origin
-    assert py_contracts.parse_bbox is jac_contracts.parse_bbox
-    assert py_contracts.parse_epoch is jac_contracts.parse_epoch
-    assert py_contracts.parse_time_window is jac_contracts.parse_time_window
-    assert py_contracts.resolve_field is jac_contracts.resolve_field
-    assert py_contracts.default_buffer_m is jac_contracts.default_buffer_m
-    assert py_contracts.namespaced_id is jac_contracts.namespaced_id
-    assert py_contracts.dedupe_ids is jac_contracts.dedupe_ids
-    assert py_contracts.assert_unique_ids is jac_contracts.assert_unique_ids
-    assert py_contracts.CANONICAL_KINDS is jac_contracts.CANONICAL_KINDS
-    assert py_contracts.KIND_ALIASES is jac_contracts.KIND_ALIASES
-    assert py_contracts.FIELD_ALIASES is jac_contracts.FIELD_ALIASES
-    assert (
-        py_contracts.DEFAULT_BUFFER_M_BY_KIND
-        is jac_contracts.DEFAULT_BUFFER_M_BY_KIND
+    functions = (
+        py_contracts.normalize_kind,
+        py_contracts.parse_origin,
+        py_contracts.parse_bbox,
+        py_contracts.parse_epoch,
+        py_contracts.parse_time_window,
+        py_contracts.resolve_field,
+        py_contracts.default_buffer_m,
+        py_contracts.namespaced_id,
+        py_contracts.dedupe_ids,
+        py_contracts.assert_unique_ids,
     )
-    # ContractError is the other direction: defined in tracker.contracts and
-    # resolved lazily (not imported at module load time -- see
-    # jac/contracts.jac's module docstring for why an eager import back is
-    # circular), so the same class is raised on both sides of the boundary.
-    assert jac_contracts.contract_error_type() is py_contracts.ContractError
-    assert isinstance(jac_contracts.contract_error("x"), py_contracts.ContractError)
+    assert all(fn.__module__ == "tracker.contracts" for fn in functions)
+    assert py_contracts.normalize_kind("Marine Sanctuary") == "mpa"
+    with pytest.raises(py_contracts.ContractError):
+        py_contracts.normalize_kind("not-a-real-kind")
 
 
 # ==========================================================================

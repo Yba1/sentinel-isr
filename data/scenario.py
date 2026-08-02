@@ -8,8 +8,8 @@ unlabelled :class:`~data.contracts.Measurement` objects plus ENU geofences.
 Boundary: this module does numerics and parsing only -- resampling,
 projection, noise, ground-truth bookkeeping. Scripted event *application*
 (``ais_off`` suppression, ``radar_contact`` injection, ``identity_change``)
-is graph mutation and lives in the ``ScenarioDriver`` walker
-(``jac/driver.jac``). Events are parsed here and attached to their frame, but
+is state mutation handled by ``aegis.driver.ScenarioDriver``. Events are parsed
+here and attached to their frame, but
 every frame carries the *full* unsuppressed AIS picture; the driver decides
 what the tracker actually sees.
 
@@ -394,8 +394,8 @@ def load_scenario(name_or_path: str) -> Scenario:
     ]
     # --- assemble frames ------------------------------------------------------
     # Every frame carries the FULL unsuppressed AIS picture. Applying events
-    # (suppression, radar injection, identity display swaps) is graph work and
-    # belongs to the ScenarioDriver walker in jac/driver.jac.
+    # (suppression, radar injection, identity display swaps) belongs to
+    # aegis.driver.ScenarioDriver.
     rng = np.random.default_rng(int(pack.get("seed", 20260726)))
     ais_sigma = float(pack.get("ais_noise_sigma_m", AIS_SIGMA_M))
     ground_truth: Dict[str, str] = {}

@@ -97,9 +97,8 @@ def test_no_measurement_carries_identity(s02):
 def test_ais_off_suppresses_and_radar_contact_injects(s02):
     """The LOADER's promise, not the walker's: "the loader always emits the
     full unsuppressed picture" (see README's Data layer section) -- ais_off
-    suppression and radar_contact injection are graph work applied later by
-    jac/driver.jac's ScenarioDriver walker (its own `test` blocks already
-    cover that end of the contract). This test checks the input the walker
+    suppression and radar_contact injection are state changes applied later by
+    aegis.driver.ScenarioDriver. This test checks the input the driver
     receives: raw AIS runs the FULL duration unsuppressed, no radar-source
     measurement exists yet, and every scripted event for this actor is
     present, in order, with the pack's actual current timings/params.

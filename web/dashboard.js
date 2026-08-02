@@ -1,7 +1,8 @@
 "use strict";
-/* Sentinel-ISR dashboard. Same "dumb frontend" discipline as web/app.js:
+/* Aegis dashboard. The local safety and financial-risk values are supplied
+ * by the server:
  * every value drawn for the local-pack tracks/zones/alerts is a verbatim
- * field from the server's FrameDelta (jac/render.jac). The one addition
+ * field from the server's FrameDelta. The one addition
  * this file computes itself is the zoomed-out GLOBAL layer's screen
  * projection for live AIS positions streamed from data/global_ais.py --
  * those come through as bare lat/lon/course, same as any Leaflet marker.
@@ -9,14 +10,17 @@
 
 const TRAIL_LEN = 20;
 const MAX_LOG_LINES = 400;
-const GLOBAL_ZOOM_THRESHOLD = 6; // below this zoom, show the global layer instead of local tracks
 
 const els = {
   map: document.getElementById("map"),
+  mapWrap: document.getElementById("map-wrap"),
+  eventlog: document.getElementById("eventlog"),
+  sidepanel: document.getElementById("sidepanel"),
   log: document.getElementById("log-entries"),
   idCount: document.getElementById("id-switch-count"),
   statsTracks: document.getElementById("stats-tracks"),
   statsDark: document.getElementById("stats-dark"),
+  statsTotal: document.getElementById("stats-total"),
   btnPlay: document.getElementById("btn-play"),
   btnReset: document.getElementById("btn-reset"),
   scrubber: document.getElementById("scrubber"),
@@ -35,6 +39,18 @@ const els = {
   jtmsConcls: document.getElementById("jtms-concls"),
   evalSummary: document.getElementById("eval-summary"),
   evalList: document.getElementById("eval-list"),
+  riskSummary: document.getElementById("risk-summary"),
+  riskList: document.getElementById("risk-list"),
+  trajectoryPanel: document.getElementById("trajectory-panel"),
+  trajectoryClose: document.getElementById("trajectory-close"),
+  trajectoryName: document.getElementById("trajectory-name"),
+  trajectoryMeta: document.getElementById("trajectory-meta"),
+  trajectoryContext: document.getElementById("trajectory-context"),
+  trajectoryGfw: document.getElementById("trajectory-gfw"),
+  trajectoryRisk: document.getElementById("trajectory-risk"),
+  trajectoryOptions: document.getElementById("trajectory-options"),
+  trajectoryHeading: document.getElementById("trajectory-heading"),
+  trajectoryNote: document.getElementById("trajectory-note"),
 };
 
 const state = {
@@ -50,6 +66,19 @@ const state = {
   packId: null,
   globalLayerOn: false,
   globalLive: false, // true once a real aisstream.io fix has arrived
+  globalVessels: new Map(),
+  globalRevision: 0,
+  globalStatus: {},
+  selectedMmsi: null,
+  selectedVessel: null,
+  trajectoryMode: "all",
+  trajectoryAnimationFrame: null,
+  trajectoryRenderId: 0,
+  predictionCache: new Map(),
+  gfwCache: new Map(),
+  localView: null,
+  preSelectionView: null,
+  lastFrameRisk: null,
 };
 
 const tracks = new Map(); // track_id -> { marker, trailGroup, ellipseLayer, positions, color }
@@ -58,21 +87,92 @@ const globalMarkers = new Map(); // mmsi -> marker
 // ------------------------------------------------------------------- map
 
 const map = L.map(els.map, {
-  zoomControl: true,
-  attributionControl: false,
+  zoomControl: false,
+  attributionControl: true,
   worldCopyJump: true,
 }).setView([20, 0], 3);
+
+const AegisZoomControl = L.Control.extend({
+  options: { position: "topleft" },
+  onAdd(targetMap) {
+    const control = L.DomUtil.create("div", "aegis-zoom-control");
+    const zoomIn = L.DomUtil.create("button", "aegis-zoom-button", control);
+    const zoomOut = L.DomUtil.create("button", "aegis-zoom-button", control);
+    zoomIn.type = "button";
+    zoomOut.type = "button";
+    zoomIn.title = "Zoom in";
+    zoomOut.title = "Zoom out";
+    zoomIn.setAttribute("aria-label", "Zoom in");
+    zoomOut.setAttribute("aria-label", "Zoom out");
+    zoomIn.innerHTML = '<span aria-hidden="true"></span>';
+    zoomOut.innerHTML = '<span aria-hidden="true"></span>';
+    L.DomEvent.disableClickPropagation(control);
+    L.DomEvent.on(zoomIn, "click", () => targetMap.zoomIn());
+    L.DomEvent.on(zoomOut, "click", () => targetMap.zoomOut());
+    return control;
+  },
+});
+new AegisZoomControl().addTo(map);
+map.attributionControl.setPrefix(false);
+
+const BoatCanvasRenderer = L.Canvas.extend({
+  _updateCircle(layer) {
+    if (!layer.options.boatShape) {
+      return L.Canvas.prototype._updateCircle.call(this, layer);
+    }
+    if (!this._drawing || layer._empty()) return;
+    const point = layer._point;
+    const size = Number(layer.options.boatSize) || 5;
+    const bearing = (Number(layer.options.boatBearing) || 0) * Math.PI / 180;
+    const ctx = this._ctx;
+    ctx.save();
+    ctx.translate(point.x, point.y);
+    ctx.rotate(bearing);
+    ctx.beginPath();
+    ctx.moveTo(0, -size * 1.45);
+    ctx.lineTo(size * 0.72, size * 0.35);
+    ctx.lineTo(size * 0.6, size * 1.25);
+    ctx.lineTo(0, size * 0.9);
+    ctx.lineTo(-size * 0.6, size * 1.25);
+    ctx.lineTo(-size * 0.72, size * 0.35);
+    ctx.closePath();
+    ctx.restore();
+    this._fillStroke(ctx, layer);
+  },
+});
 
 L.tileLayer(
   // CARTO retired the "dark_matter" path (404s now); "dark_all" is the
   // live equivalent -- confirmed by curl against basemaps.cartocdn.com.
   "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-  { subdomains: "abcd", maxZoom: 19 }
+  {
+    subdomains: "abcd",
+    maxZoom: 19,
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · ' +
+      '&copy; <a href="https://carto.com/attributions">CARTO</a>',
+  }
 ).addTo(map);
 
 const zonesLayer = L.featureGroup().addTo(map); // needs getBounds(); plain layerGroup lacks it
 const localLayer = L.layerGroup().addTo(map);
 const globalLayer = L.layerGroup();
+const globalProjectionLayer = L.layerGroup().addTo(globalLayer);
+map.createPane("vesselPane");
+map.getPane("vesselPane").style.zIndex = 390;
+map.getPane("vesselPane").style.transition = "opacity 140ms ease";
+const globalRenderer = new BoatCanvasRenderer({
+  padding: 0.5,
+  tolerance: 8,
+  pane: "vesselPane",
+});
+map.on("zoomstart", () => {
+  map.getPane("vesselPane").style.opacity = "0";
+});
+map.on("zoomend", () => {
+  globalRenderer._update();
+  map.getPane("vesselPane").style.opacity = "1";
+});
 
 function drawZones(zones) {
   zonesLayer.clearLayers();
@@ -90,7 +190,7 @@ function drawZones(zones) {
       .bindTooltip(`${z.name} (${z.kind})`)
       .addTo(zonesLayer);
   }
-  if (zones && zones.length) {
+  if (zones && zones.length && !state.globalLayerOn) {
     state.zonesDrawn = true;
     map.fitBounds(zonesLayer.getBounds().pad(6), { animate: false });
   }
@@ -230,10 +330,37 @@ function renderLogEntries(entries, { replace }) {
 
 // ----------------------------------------------------------------- stats
 
+function globalContactCounts() {
+  const status = state.globalStatus;
+  if (Number.isFinite(Number(status.total_contacts))) {
+    return {
+      active: Number(status.active_contacts) || 0,
+      dark: Number(status.dark_contacts) || 0,
+      total: Number(status.total_contacts) || 0,
+    };
+  }
+  let dark = 0;
+  for (const vessel of state.globalVessels.values()) {
+    if (vessel.dark) dark += 1;
+  }
+  return { active: state.globalVessels.size - dark, dark, total: state.globalVessels.size };
+}
+
 function updateStats(msg) {
+  if (state.globalLayerOn) {
+    const counts = globalContactCounts();
+    els.statsTracks.textContent = counts.active;
+    els.statsDark.textContent = counts.dark;
+    els.statsTotal.textContent = counts.total;
+    els.idCount.textContent = state.globalStatus.identity_switches ?? 0;
+    return;
+  }
   const s = msg.stats || {};
-  els.statsTracks.textContent = s.n_tracks ?? 0;
-  els.statsDark.textContent = s.n_dark ?? 0;
+  const total = Number(s.n_tracks ?? 0);
+  const dark = Number(s.n_dark ?? 0);
+  els.statsTracks.textContent = Math.max(0, total - dark);
+  els.statsDark.textContent = dark;
+  els.statsTotal.textContent = total;
   if (typeof msg.id_switches === "number") {
     els.idCount.textContent = msg.id_switches;
     if (msg.id_switches > state.lastIdSwitches) {
@@ -242,6 +369,41 @@ function updateStats(msg) {
       els.idCount.classList.add("flash");
     }
     state.lastIdSwitches = msg.id_switches;
+  }
+}
+
+function formatUsd(value) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(Number(value || 0));
+}
+
+function updateFinancialRisk(msg) {
+  const risk = msg.financial_risk || { low_usd: 0, high_usd: 0, items: [] };
+  state.lastFrameRisk = risk;
+  if (state.selectedMmsi !== null) return;
+  renderRiskPanel(risk, "Current frame");
+}
+
+function renderRiskPanel(risk, scope) {
+  els.riskSummary.innerHTML =
+    `<div class="risk-total"><span class="hint">Estimated response budget</span>` +
+    `<span class="amount">${formatUsd(risk.low_usd)}–${formatUsd(risk.high_usd)}</span>` +
+    `<span class="hint">${escapeHtml(scope)} · planning range, not realized loss</span></div>`;
+  els.riskList.innerHTML = "";
+  for (const item of risk.items || []) {
+    const div = document.createElement("div");
+    div.className = `risk-card ${item.severity === "critical" ? "critical" : ""}`;
+    div.innerHTML =
+      `<div class="risk-range">${formatUsd(item.low_usd)}–${formatUsd(item.high_usd)}</div>` +
+      `<div class="risk-label">${escapeHtml(item.label)}</div>` +
+      `<div class="risk-basis">${escapeHtml(item.basis || "Deterministic Aegis response-cost rule.")}</div>`;
+    els.riskList.appendChild(div);
+  }
+  if (!(risk.items || []).length) {
+    els.riskList.innerHTML = `<p class="hint">No active incident-response costs in this frame.</p>`;
   }
 }
 
@@ -270,6 +432,11 @@ function setAssocUi(mode) {
   const naive = mode === "greedy";
   els.btnAssoc.textContent = naive ? "NAIVE (greedy)" : "GLOBAL (Hungarian)";
   els.btnAssoc.classList.toggle("naive", naive);
+  if (state.globalLayerOn) {
+    els.assocBadge.textContent = "AIS LIVE";
+    els.assocBadge.classList.remove("naive");
+    return;
+  }
   els.assocBadge.textContent = naive ? "NAIVE" : "GLOBAL";
   els.assocBadge.classList.toggle("naive", naive);
 }
@@ -400,53 +567,482 @@ document.querySelector('[data-tab="jtms"]').addEventListener("click", () => { if
 
 // ----------------------------------------------------------- global layer
 
-function globalMarkerIcon() {
-  return L.divIcon({ className: "global-dot", html: `<div style="width:5px;height:5px;border-radius:50%;background:#ffb020;box-shadow:0 0 4px #ffb020;"></div>`, iconSize: [5, 5], iconAnchor: [2, 2] });
+function globalMarkerStyle(v, stale = false) {
+  const critical = (v.risk?.items || []).some((item) => item.severity === "critical");
+  const color = stale ? "#94a3b8" : critical ? "#ef4444" : "#ffb020";
+  return {
+    boatShape: true,
+    boatSize: 5,
+    boatBearing: Number(v.course) || 0,
+    color,
+    weight: v.dark ? 1.5 : 0.8,
+    opacity: stale ? 0.45 : 0.95,
+    fillColor: color,
+    fillOpacity: v.dark ? 0.08 : 0.78,
+    dashArray: v.dark ? "3 2" : null,
+  };
+}
+
+function stopTrajectoryAnimation() {
+  if (state.trajectoryAnimationFrame !== null) {
+    cancelAnimationFrame(state.trajectoryAnimationFrame);
+    state.trajectoryAnimationFrame = null;
+  }
+}
+
+function startTrajectoryAnimation(runners) {
+  stopTrajectoryAnimation();
+  const startedAt = performance.now();
+  const durationMs = 4800;
+  const travelEnd = 0.88;
+  const fadeStart = 0.8;
+  const animate = (now) => {
+    const phase = ((now - startedAt) % durationMs) / durationMs;
+    const progress = Math.min(1, phase / travelEnd);
+    const eased = progress * progress * (3 - 2 * progress);
+    const opacity = phase < fadeStart
+      ? 1
+      : Math.max(0, (travelEnd - phase) / (travelEnd - fadeStart));
+    for (const runner of runners) {
+      const scaled = eased * (runner.path.length - 1);
+      const segment = Math.min(runner.path.length - 2, Math.floor(scaled));
+      const fraction = scaled - segment;
+      const from = runner.path[segment];
+      const to = runner.path[segment + 1];
+      runner.marker.setLatLng([
+        from[0] + (to[0] - from[0]) * fraction,
+        from[1] + (to[1] - from[1]) * fraction,
+      ]);
+      runner.marker.setStyle({ opacity, fillOpacity: opacity });
+    }
+    state.trajectoryAnimationFrame = requestAnimationFrame(animate);
+  };
+  state.trajectoryAnimationFrame = requestAnimationFrame(animate);
+}
+
+function hideTrajectory({ restoreView = true } = {}) {
+  stopTrajectoryAnimation();
+  state.trajectoryRenderId += 1;
+  const returnView = state.preSelectionView;
+  state.preSelectionView = null;
+  if (state.selectedMmsi !== null) {
+    postJson("/api/global/pin", { mmsi: null }).catch(() => {});
+  }
+  state.selectedMmsi = null;
+  state.selectedVessel = null;
+  globalProjectionLayer.clearLayers();
+  els.trajectoryPanel.classList.add("hidden");
+  if (els.trajectoryPanel.parentElement !== els.mapWrap) {
+    els.mapWrap.appendChild(els.trajectoryPanel);
+  }
+  if (state.lastFrameRisk) renderRiskPanel(state.lastFrameRisk, "Current frame");
+  if (restoreView && returnView && state.globalLayerOn) {
+    map.flyTo(returnView.center, returnView.zoom, {
+      animate: true,
+      duration: 1.1,
+      easeLinearity: 0.2,
+    });
+  }
+}
+
+function renderGfwIdentity(data) {
+  if (!data.configured) {
+    els.trajectoryGfw.innerHTML =
+      `<div class="trajectory-heading">Global Fishing Watch</div>` +
+      `<div>Token not configured in local <code>.env</code>.</div>`;
+    return;
+  }
+  if (!data.matched) {
+    const reason = data.error ? ` · ${escapeHtml(data.error)}` : "";
+    els.trajectoryGfw.innerHTML =
+      `<div class="trajectory-heading">Global Fishing Watch</div>` +
+      `<div>No identity match${reason}.</div>`;
+    return;
+  }
+  const details = [
+    data.name,
+    data.flag ? `flag ${data.flag}` : "",
+    data.imo && data.imo !== "0" ? `IMO ${data.imo}` : "",
+    (data.ship_types || []).join(", "),
+    Number.isFinite(Number(data.positions_count))
+      ? `${Number(data.positions_count).toLocaleString()} historical positions`
+      : "",
+  ].filter(Boolean);
+  els.trajectoryGfw.innerHTML =
+    `<div class="trajectory-heading">Global Fishing Watch identity</div>` +
+    `<div>${details.map(escapeHtml).join(" · ")}</div>`;
+}
+
+async function loadGfwIdentity(mmsi) {
+  if (state.gfwCache.has(mmsi)) {
+    renderGfwIdentity(state.gfwCache.get(mmsi));
+    return;
+  }
+  els.trajectoryGfw.innerHTML =
+    `<div class="trajectory-heading">Global Fishing Watch</div><div>Checking vessel identity…</div>`;
+  try {
+    const data = await getJson(`/api/global/${encodeURIComponent(mmsi)}/gfw`);
+    state.gfwCache.set(mmsi, data);
+    if (state.selectedMmsi === mmsi) renderGfwIdentity(data);
+  } catch (err) {
+    if (state.selectedMmsi === mmsi) {
+      renderGfwIdentity({ configured: true, matched: false, error: "request_failed" });
+    }
+  }
+}
+
+function refreshSelectedVessel(v) {
+  state.selectedVessel = v;
+  const age = Math.max(0, Number(v.age_s) || 0);
+  const lastFix = new Date((Number(v.last_seen) || Date.now() / 1000) * 1000);
+  const risk = v.risk || { low_usd: 0, high_usd: 0, items: [] };
+  els.trajectoryName.textContent = v.name || `MMSI ${v.mmsi}`;
+  els.trajectoryMeta.innerHTML =
+    `Last fix: ${escapeHtml(lastFix.toISOString().slice(11, 19))} UTC<br>` +
+    `${v.dark ? `Dark for: ${Math.round(age)} s<br>` : ""}` +
+    `MMSI: ${escapeHtml(v.mmsi)}${v.imo ? ` · IMO: ${escapeHtml(v.imo)}` : ""}<br>` +
+    `Track: ${Number(v.course || 0).toFixed(0)}° · ${Number(v.speed_kn || 0).toFixed(1)} kn` +
+    `${v.destination ? `<br>Destination: ${escapeHtml(v.destination)}` : ""}` +
+    `${v.call_sign ? ` · Call sign: ${escapeHtml(v.call_sign)}` : ""}`;
+  els.trajectoryRisk.innerHTML =
+    `<div class="trajectory-heading">Financial response range</div>` +
+    `<div class="trajectory-cost">${formatUsd(risk.low_usd)}–${formatUsd(risk.high_usd)}</div>`;
+  renderRiskPanel(risk, v.name || `MMSI ${v.mmsi}`);
+}
+
+async function showTrajectory(v) {
+  const renderId = ++state.trajectoryRenderId;
+  if (v.dark && state.selectedMmsi === null) {
+    const center = map.getCenter();
+    state.preSelectionView = {
+      center: [center.lat, center.lng],
+      zoom: map.getZoom(),
+    };
+  }
+  if (state.selectedMmsi !== v.mmsi) {
+    postJson("/api/global/pin", { mmsi: v.mmsi }).catch(() => {});
+  }
+  state.selectedMmsi = v.mmsi;
+  stopTrajectoryAnimation();
+  globalProjectionLayer.clearLayers();
+  const start = [Number(v.lat), Number(v.lon)];
+  const context = v.context || {};
+  refreshSelectedVessel(v);
+
+  const contextLines = [];
+  if (context.ofac) {
+    contextLines.push(
+      `<strong class="context-critical">OFAC match:</strong> ${escapeHtml(context.ofac.name)} ` +
+      `(${escapeHtml(context.ofac.program)}, via ${escapeHtml(context.ofac.match_basis)})`
+    );
+  }
+  if (context.in_sanctuary) contextLines.push("Inside Monterey Bay sanctuary");
+  if (context.in_port) {
+    contextLines.push(
+      `${escapeHtml(context.port?.name || "SAN FRANCISCO")} port · ` +
+      `${Number(context.port?.distance_km || 0).toFixed(1)} km · NGA World Port Index`
+    );
+  }
+  if (context.on_land) contextLines.push("Position intersects coastline data");
+  for (const cable of context.near_cables || []) {
+    contextLines.push(`${escapeHtml(cable.name)} cable · ${Number(cable.distance_km).toFixed(1)} km`);
+  }
+  els.trajectoryContext.innerHTML = contextLines.length
+    ? `<div class="trajectory-heading">Reference-data matches</div>${contextLines.map((line) => `<div>${line}</div>`).join("")}`
+    : `<div class="context-clear">No bundled reference-data match at this position.</div>`;
+  loadGfwIdentity(v.mmsi);
+  if (els.trajectoryPanel.parentElement !== els.eventlog) {
+    els.eventlog.appendChild(els.trajectoryPanel);
+  }
+  els.trajectoryPanel.classList.remove("hidden");
+  const modeSwitch = els.trajectoryPanel.querySelector(".trajectory-mode-switch");
+  modeSwitch.classList.toggle("hidden", !v.dark);
+  if (!v.dark) {
+    els.trajectoryHeading.textContent = "AIS transmitting · live contact";
+    els.trajectoryOptions.innerHTML =
+      `<div class="trajectory-option"><span class="trajectory-swatch"></span>` +
+      `<span>Current reported position</span><span class="trajectory-distance">LIVE</span></div>`;
+    els.trajectoryNote.textContent =
+      "No predicted trajectory is shown while this vessel is actively transmitting AIS.";
+    return;
+  }
+  els.trajectoryHeading.textContent = "Calculating Monte Carlo branches…";
+  els.trajectoryOptions.innerHTML = "";
+  els.trajectoryNote.textContent =
+    "Using the last AIS position, speed, heading, turn rate, track history, silence duration, and available coastline constraints.";
+  const targetZoom = Math.max(map.getZoom(), 11);
+  const mapCenterPoint = L.point(map.getSize().x / 2, map.getSize().y / 2);
+  const vesselPoint = map.latLngToContainerPoint(start);
+  const needsCameraMove =
+    map.getZoom() < targetZoom || vesselPoint.distanceTo(mapCenterPoint) > 30;
+  let cameraReady = Promise.resolve();
+  if (needsCameraMove) {
+    map.flyTo(start, targetZoom, {
+      animate: true,
+      duration: 1.1,
+      easeLinearity: 0.2,
+    });
+    cameraReady = new Promise((resolve) => window.setTimeout(resolve, 1150));
+  }
+
+  const cacheKey = `${v.mmsi}:${v.last_seen}`;
+  let prediction = state.predictionCache.get(cacheKey);
+  try {
+    if (!prediction) {
+      prediction = await getJson(`/api/global/${encodeURIComponent(v.mmsi)}/prediction`);
+      state.predictionCache.set(cacheKey, prediction);
+    }
+  } catch (_err) {
+    if (state.trajectoryRenderId === renderId) {
+      els.trajectoryHeading.textContent = "Prediction unavailable";
+      els.trajectoryNote.textContent = "The dark-contact model could not be calculated.";
+    }
+    return;
+  }
+  await cameraReady;
+  if (state.trajectoryRenderId !== renderId || state.selectedMmsi !== v.mmsi) return;
+
+  const colors = ["#2dd4bf", "#5ec8d8", "#a78bfa", "#f59e0b", "#f472b6",
+    "#60a5fa", "#34d399", "#fb7185", "#c084fc", "#facc15"];
+  const allScenarios = prediction.scenarios || [];
+  const scenarios = state.trajectoryMode === "single"
+    ? allScenarios.slice(0, 1)
+    : allScenarios;
+  const runners = [];
+  els.trajectoryHeading.textContent =
+    `${prediction.samples} Monte Carlo runs · ${allScenarios.length} branches · ` +
+    `${prediction.horizon_minutes} minute horizon`;
+  els.trajectoryOptions.innerHTML = "";
+
+  if ((v.history || []).length > 1) {
+    L.polyline(v.history, {
+      color: "#ffb020",
+      weight: 2,
+      opacity: 0.65,
+      interactive: false,
+    }).addTo(globalProjectionLayer);
+  }
+  scenarios.forEach((scenario, index) => {
+    const color = colors[index % colors.length];
+    const path = scenario.path;
+    const end = path[path.length - 1];
+    L.polyline(path, {
+      color,
+      weight: 2,
+      opacity: 0.9,
+      dashArray: "6 5",
+      interactive: false,
+      className: `trajectory-path trajectory-path-${index}`,
+    }).addTo(globalProjectionLayer);
+    L.circle(end, {
+      radius: Number(scenario.uncertainty_radius_m) || 100,
+      color,
+      weight: 1,
+      opacity: 0.75,
+      fillColor: color,
+      fillOpacity: 0.08,
+      dashArray: "3 4",
+      interactive: false,
+      className: "trajectory-radius",
+    }).addTo(globalProjectionLayer);
+    const runner = L.circleMarker(start, {
+      radius: 4,
+      color,
+      weight: 2,
+      fillColor: "#ffffff",
+      fillOpacity: 1,
+      interactive: false,
+      className: "trajectory-runner",
+    }).addTo(globalProjectionLayer);
+    runners.push({ marker: runner, path });
+
+    const row = document.createElement("div");
+    row.className = "trajectory-option";
+    row.innerHTML =
+      `<span class="trajectory-swatch" style="background:${color}"></span>` +
+      `<span>Branch ${index + 1} · ${(Number(scenario.probability) * 100).toFixed(1)}%</span>` +
+      `<span class="trajectory-distance">${Number(scenario.distance_nm).toFixed(1)} nm</span>`;
+    els.trajectoryOptions.appendChild(row);
+  });
+  const unavailable = Object.entries(prediction.signal_availability || {})
+    .filter(([, available]) => !available)
+    .map(([name]) => name.replaceAll("_", " "));
+  const drivers = prediction.uncertainty_drivers || [];
+  els.trajectoryNote.textContent =
+    `${drivers.length ? `Uncertainty increased by: ${drivers.join(", ")}. ` : ""}` +
+    `${unavailable.length ? `Unavailable: ${unavailable.join(", ")}.` : ""}`;
+  startTrajectoryAnimation(runners);
+  if (scenarios.length) {
+    const bounds = L.latLngBounds(scenarios.flatMap((scenario) => scenario.path));
+    if (bounds.isValid() && !map.getBounds().contains(bounds)) {
+      map.flyToBounds(bounds.pad(0.25), { maxZoom: targetZoom, duration: 0.7 });
+    }
+  }
 }
 
 function applyGlobalFix(v) {
   let m = globalMarkers.get(v.mmsi);
   if (!m) {
-    m = L.marker([v.lat, v.lon], { icon: globalMarkerIcon(), interactive: false }).addTo(globalLayer);
+    m = L.circleMarker([v.lat, v.lon], {
+      renderer: globalRenderer,
+      radius: 8,
+      ...globalMarkerStyle(v),
+      interactive: true,
+      bubblingMouseEvents: false,
+    }).addTo(globalLayer);
+    m.on("click", () => showTrajectory(m._fix));
+    m.bindTooltip("", { sticky: true });
     globalMarkers.set(v.mmsi, m);
   } else {
     m.setLatLng([v.lat, v.lon]);
+    m.setStyle(globalMarkerStyle(v));
   }
+  m._stale = false;
+  m._fix = v;
+  m._dark = !!v.dark;
+  m._riskHigh = Number(v.risk?.high_usd || 0);
+  const contextFlags = [
+    v.context?.ofac ? "OFAC MATCH" : "",
+    v.context?.in_sanctuary ? "SANCTUARY" : "",
+    (v.context?.near_cables || []).length ? "CABLE PROXIMITY" : "",
+  ].filter(Boolean);
+  m.setTooltipContent(
+    `${escapeHtml(v.name || `MMSI ${v.mmsi}`)} · ${Number(v.course || 0).toFixed(0)}° · ` +
+    `${Number(v.speed_kn || 0).toFixed(1)} kn${v.dark ? " · DARK / COASTING" : ""}` +
+    `${contextFlags.length ? ` · ${contextFlags.join(" · ")}` : ""}`
+  );
+  if (state.selectedMmsi === v.mmsi) {
+    const resumedAis = state.selectedVessel?.dark && !v.dark;
+    if (resumedAis) showTrajectory(v);
+    else refreshSelectedVessel(v);
+  }
+}
+
+els.trajectoryClose.addEventListener("click", hideTrajectory);
+for (const button of document.querySelectorAll(".trajectory-mode")) {
+  button.addEventListener("click", () => {
+    state.trajectoryMode = button.dataset.trajectoryMode;
+    for (const other of document.querySelectorAll(".trajectory-mode")) {
+      other.classList.toggle("active", other === button);
+    }
+    if (state.selectedVessel) showTrajectory(state.selectedVessel);
+  });
+}
+
+function globalStatusText() {
+  if (state.globalLive) {
+    return `LIVE AISSTREAM · ${globalContactCounts().total} contacts`;
+  }
+  if (!state.globalStatus.configured) {
+    return "LIVE AIS DISABLED · ADD AISSTREAM_API_KEY TO .env";
+  }
+  if (state.globalStatus.connected) {
+    return "AISSTREAM CONNECTED · WAITING FOR POSITION REPORTS";
+  }
+  return "AISSTREAM CONNECTING / RETRYING";
+}
+
+function renderLiveRail(status) {
+  if (!document.getElementById("live-rail-contacts")) {
+    els.log.innerHTML =
+      `<div class="log-line log-track"><span class="tag">[AIS]</span><span id="live-rail-contacts"></span></div>` +
+      `<div class="log-line log-fusion"><span class="tag">[STREAM]</span><span id="live-rail-messages"></span></div>` +
+      `<div class="log-line log-event"><span class="tag">[IDENTITY]</span><span id="live-rail-identities"></span></div>` +
+      `<div class="log-line log-zone"><span class="tag">[CONTEXT]</span>NOAA · NGA · Natural Earth · cables · OFAC</div>` +
+      `<div class="log-line log-log"><span class="tag">[ENRICH]</span>Global Fishing Watch on contact selection</div>`;
+  }
+  const counts = globalContactCounts();
+  document.getElementById("live-rail-contacts").textContent =
+    `${counts.active.toLocaleString()} active · ` +
+    `${counts.dark.toLocaleString()} dark · ` +
+    `${counts.total.toLocaleString()} total`;
+  document.getElementById("live-rail-messages").textContent =
+    `${Number(status.position_reports || 0).toLocaleString()} positions · ` +
+    `${Number(status.static_reports || 0).toLocaleString()} static/voyage`;
+  document.getElementById("live-rail-identities").textContent =
+    `${Number(status.identity_switches || 0).toLocaleString()} observed changes`;
 }
 
 function setGlobalLayer(on) {
   state.globalLayerOn = on;
+  document.body.classList.toggle("live-mode", on);
   els.btnGlobalLayer.classList.toggle("active", on);
   if (on) {
+    state.localView = { center: map.getCenter(), zoom: map.getZoom() };
     map.removeLayer(localLayer);
+    map.removeLayer(zonesLayer);
     globalLayer.addTo(map);
+    const counts = globalContactCounts();
+    els.statsTracks.textContent = counts.active;
+    els.statsDark.textContent = counts.dark;
+    els.statsTotal.textContent = counts.total;
+    els.idCount.textContent = state.globalStatus.identity_switches ?? 0;
+    els.assocBadge.textContent = "AIS LIVE";
+    els.assocBadge.classList.remove("naive");
+    renderLiveRail(state.globalStatus);
     els.globalBadge.classList.remove("hidden");
-    els.globalBadge.textContent = state.globalLive
-      ? "LIVE GLOBAL AIS · aisstream.io"
-      : "DEMO · SYNTHETIC GLOBAL TRAFFIC · NOT LIVE AIS";
+    els.globalBadge.textContent = globalStatusText();
   } else {
+    hideTrajectory({ restoreView: false });
     map.removeLayer(globalLayer);
     localLayer.addTo(map);
+    zonesLayer.addTo(map);
+    setAssocUi(state.assocMode);
+    if (state.localView) {
+      map.setView(state.localView.center, state.localView.zoom, { animate: false });
+      state.localView = null;
+    }
     els.globalBadge.classList.add("hidden");
   }
 }
 els.btnGlobalLayer.addEventListener("click", () => setGlobalLayer(!state.globalLayerOn));
 
-map.on("zoomend", () => {
-  const shouldGlobal = map.getZoom() < GLOBAL_ZOOM_THRESHOLD;
-  if (shouldGlobal !== state.globalLayerOn) setGlobalLayer(shouldGlobal);
-});
-
 let globalPollTimer = null;
 async function pollGlobal() {
   try {
-    const data = await getJson("/api/global");
+    const data = await getJson(`/api/global?since=${state.globalRevision}`);
     state.globalLive = !!data.live;
-    for (const v of data.vessels || []) applyGlobalFix(v);
+    state.globalStatus = data.status || {};
+    if (data.full) {
+      for (const marker of globalMarkers.values()) globalLayer.removeLayer(marker);
+      globalMarkers.clear();
+      state.globalVessels.clear();
+    }
+    for (const v of data.vessels || []) {
+      state.globalVessels.set(v.mmsi, v);
+      applyGlobalFix(v);
+    }
+    for (const mmsi of data.removed || []) {
+      const marker = globalMarkers.get(mmsi);
+      if (!marker) continue;
+      if (state.selectedMmsi === mmsi) {
+        marker._stale = true;
+        marker.setStyle(globalMarkerStyle(marker._fix || {}, true));
+        marker.setTooltipContent(
+          `${escapeHtml(marker._fix?.name || `MMSI ${mmsi}`)} · selected · awaiting feed refresh`
+        );
+        continue;
+      }
+      globalLayer.removeLayer(marker);
+      globalMarkers.delete(mmsi);
+      state.globalVessels.delete(mmsi);
+    }
+    state.globalRevision = Number(data.revision) || state.globalRevision;
     if (state.globalLayerOn) {
+      const counts = globalContactCounts();
+      els.statsTracks.textContent = counts.active;
+      els.statsDark.textContent = counts.dark;
+      els.statsTotal.textContent = counts.total;
+      const status = data.status || {};
+      els.idCount.textContent = status.identity_switches ?? 0;
+      renderLiveRail(status);
       els.globalBadge.textContent = state.globalLive
-        ? `LIVE GLOBAL AIS · aisstream.io · ${data.vessels.length} contacts`
-        : "DEMO · SYNTHETIC GLOBAL TRAFFIC · NOT LIVE AIS";
+        ? `LIVE AISSTREAM · ${counts.total.toLocaleString()} contacts · ` +
+          `${Number(status.position_reports || 0).toLocaleString()} positions · ` +
+          `${Number(status.static_reports || 0).toLocaleString()} static/voyage · ` +
+          `${Number(status.identity_switches || 0).toLocaleString()} identity changes · ` +
+          `${status.regions || 0} regions`
+        : globalStatusText();
     }
   } catch (err) {
     // Global layer is best-effort; local pack streaming must never depend on it.
@@ -488,6 +1084,7 @@ function applyMessage(msg) {
   if (msg.type === "frame" || msg.type === "sync") {
     updateTracks(msg.tracks);
     updateStats(msg);
+    updateFinancialRisk(msg);
     updateScrubber(msg.frame_idx);
     setPlayingUi(msg.playing);
     setSpeedUi(msg.speed);
@@ -495,11 +1092,15 @@ function applyMessage(msg) {
 
     if (msg.type === "sync") {
       drawZones(msg.zones && msg.zones.length ? msg.zones : null);
-      const entries = [fusionEntry(msg)].concat((msg.history_alerts || []).map(alertEntry)).concat((msg.history_log || []).map(parseLogLine));
-      renderLogEntries(entries, { replace: true });
+      if (!state.globalLayerOn) {
+        const entries = [fusionEntry(msg)].concat((msg.history_alerts || []).map(alertEntry)).concat((msg.history_log || []).map(parseLogLine));
+        renderLogEntries(entries, { replace: true });
+      }
     } else {
-      const entries = [fusionEntry(msg)].concat((msg.alerts || []).map(alertEntry)).concat((msg.log || []).map(parseLogLine));
-      renderLogEntries(entries, { replace: false });
+      if (!state.globalLayerOn) {
+        const entries = [fusionEntry(msg)].concat((msg.alerts || []).map(alertEntry)).concat((msg.log || []).map(parseLogLine));
+        renderLogEntries(entries, { replace: false });
+      }
       const crit = (msg.alerts || []).find((a) => a.severity === "critical");
       if (crit) {
         els.banner.textContent = `⚠ ${crit.headline}`;
@@ -537,8 +1138,10 @@ document.addEventListener("keydown", (ev) => {
   else if (ev.key === "m" || ev.key === "M") toggleAssoc();
   else if (ev.key === "x" || ev.key === "X") jtmsRetract("broadcast_b_mmsi");
   else if (ev.key === "r" || ev.key === "R") jtmsReinstate("broadcast_b_mmsi");
+  else if (ev.key === "Escape" && state.selectedMmsi !== null) hideTrajectory();
   else if (ev.key === "Escape") els.btnReset.click();
 });
 
+setGlobalLayer(true);
 connect();
 jtmsReset().then(loadBrief);

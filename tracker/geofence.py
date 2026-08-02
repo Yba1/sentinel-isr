@@ -9,11 +9,11 @@ and nothing more -- it is stateless, pure geometry.
 
 **Transition tracking is deliberately not here.** "Was this track inside last
 frame?", "emit an INTRUSION event", "a dark vessel inside an MPA is severity
-CRITICAL" -- all of that is per-track state and lives in the Jac layer, on the
-hypothesis graph where the rest of the track lifecycle already lives. Putting a
+CRITICAL" -- all of that is per-track state and lives in the Aegis orchestration
+layer where the rest of the track lifecycle already lives. Putting a
 `previous_inside` flag in this file would fork the tracker's state across two
-languages. If you are about to add a member that remembers a track, stop: it
-belongs in Jac.
+modules. If you are about to add a member that remembers a track, stop: it
+belongs in the orchestration layer.
 
 Coordinates
 -----------
@@ -106,7 +106,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -290,16 +290,6 @@ def lonlat_to_enu(
 
 # ==========================================================================
 # INTEROP: kind vocabulary, foreign-shape adapters, GeoJSON loading
-#
-# Everything from here down through the Jac import boundary is a GENUINE
-# GEOMETRY/NUMERICAL KERNEL (shapely construction, buffering, coordinate
-# projection) or trivial vocabulary re-export. The DECISION logic that used
-# to sit directly in geofence_from_ring / geofence_from_mapping /
-# load_geojson_fences / build_index -- which fields to read, what kind a
-# fence is, how to namespace an id, which GeoJSON feature shape it is -- now
-# lives in jac/fences.jac, which calls back into the kernels below. See that
-# file's module docstring for the full rationale and the proven bidirectional
-# import mechanism (same trick as tracker/contracts.py <-> jac/contracts.jac).
 # ==========================================================================
 
 
@@ -315,10 +305,10 @@ class GeofenceContractError(contracts.ContractError):
 
 
 #: The only kind values that may reach :class:`Geofence`. Downstream severity
-#: rules (Jac) switch on these strings; anything else is a merge bug.
+#: rules switch on these strings; anything else is a merge bug.
 #:
 #: Sourced from :mod:`tracker.contracts` -- the single vocabulary shared across
-#: the tracker, the scenario loader and the Jac layer. Do NOT reintroduce a
+#: the tracker, the scenario loader and the orchestration layer. Do NOT reintroduce a
 #: private copy here: that is exactly the drift this module used to have (a
 #: 4-kind table missing "land", the coastline/grounding-hazard kind).
 CANONICAL_KINDS: tuple[str, ...] = contracts.CANONICAL_KINDS
@@ -328,9 +318,38 @@ CANONICAL_KINDS: tuple[str, ...] = contracts.CANONICAL_KINDS
 #: raises -- it never guesses).
 KIND_ALIASES: dict[str, str] = contracts.KIND_ALIASES
 
-# Sentinel distinguishing "caller passed default=None" from "caller passed no
+# Marker distinguishing "caller passed default=None" from "caller passed no
 # default at all". None is a legitimate thing to want back.
 _NO_DEFAULT = object()
+
+# Property keys a GeoJSON feature may use to declare its kind. An allowlist, on
+# purpose: scanning every property value for something alias-shaped is how a
+# fence silently acquires a kind from an unrelated attribute.
+_KIND_PROPERTY_KEYS = ("kind", "type", "category", "class", "fence_type", "layer")
+_LABEL_PROPERTY_KEYS = ("label", "name", "title", "sanctuary")
+_ID_PROPERTY_KEYS = ("id", "fence_id", "geofence_id", "poly_id")
+
+# id / label / kind / buffer_m are resolved via contracts.resolve_field and
+# contracts.FIELD_ALIASES (see geofence_from_mapping) rather than a private
+# copy of those tables -- that private-copy drift is exactly what let a
+# mapping spelled {"buffer": 500} silently resolve to buffer_m=0.0 before.
+#
+# Geometry stays geofence-specific: contracts' "geometry" alias list is
+# generic (it does not know this module's shapely handling), so the local
+# table below is authoritative for geometry, but it is a strict superset of
+# contracts.FIELD_ALIASES["geometry"] -- nothing contracts.py already agreed
+# to accept ("geometry", "rings") is rejected here.
+_GEOM_FIELDS = ("geom", "polygon", "ring", "coordinates", "geometry", "rings")
+
+
+def _norm_token(raw: object) -> str:
+    """Lowercase, trim, and fold spaces/hyphens/dots to single underscores."""
+    s = str(raw).strip().lower()
+    for ch in (" ", "-", ".", "/"):
+        s = s.replace(ch, "_")
+    while "__" in s:
+        s = s.replace("__", "_")
+    return s.strip("_")
 
 
 def normalize_kind(raw: str, *, default: Any = _NO_DEFAULT) -> str:
@@ -371,6 +390,23 @@ def normalize_kind(raw: str, *, default: Any = _NO_DEFAULT) -> str:
         return contracts.normalize_kind(raw, default=default)
     except contracts.ContractError as exc:
         raise GeofenceContractError(str(exc)) from exc
+
+
+def _resolve_field(m: object, names: Sequence[str]) -> tuple[str, Any] | None:
+    """First present, non-None ``(name, value)`` from a dict OR an object.
+
+    Duck-typed so a plain dict, a ``dataclass`` instance and an ad-hoc namespace
+    all work without importing anything from a teammate's branch.
+    """
+    for name in names:
+        if isinstance(m, Mapping):
+            if name in m and m[name] is not None:
+                return name, m[name]
+        else:
+            val = getattr(m, name, None)
+            if val is not None:
+                return name, val
+    return None
 
 
 def _coord_depth(obj: object) -> int:
@@ -432,90 +468,6 @@ def _geom_from_coords(coords: object) -> Polygon:
     )
 
 
-# --------------------------------------------------------------------------
-# GeoJSON loading kernels (WGS84 lon/lat in, ENU-metre fences out). These are
-# numerical/geometry kernels -- projection math and shapely construction --
-# and stay Python. The decision of WHICH of these to call, with WHAT
-# arguments, for a given GeoJSON feature lives in jac/fences.jac.
-# --------------------------------------------------------------------------
-
-_POLYGONAL = ("Polygon", "MultiPolygon")
-_LINEAL = ("LineString", "MultiLineString")
-
-
-def _project(coords: Sequence[Sequence[float]], origin) -> np.ndarray:
-    """Project one GeoJSON position list to ENU, dropping any elevation.
-
-    GeoJSON positions are legally ``[lon, lat]`` OR ``[lon, lat, alt]``, and
-    ``lonlat_to_enu`` reshapes to (-1, 2) -- which for an (N, 3) input with even
-    N does not raise, it reinterprets the buffer into garbage coordinates that
-    still pass "area > 0". So the third ordinate is sliced off *here*, before the
-    converter sees it. Not fixed inside ``lonlat_to_enu``: other modules import
-    it and its (-1, 2) contract is theirs too.
-    """
-    arr = np.asarray(coords, dtype=float)
-    if arr.ndim != 2 or arr.shape[1] < 2:
-        raise GeofenceContractError(
-            f"expected a list of [lon, lat] positions, got shape {arr.shape}"
-        )
-    return lonlat_to_enu(arr[:, :2], origin)
-
-
-def _rings_to_enu(rings: Sequence[Sequence[Sequence[float]]], origin) -> Polygon:
-    """One GeoJSON polygon (shell + holes), each ring projected separately."""
-    enu = [_project(r, origin) for r in rings]
-    return _polygon_from_rings(enu)
-
-
-def _feature_geometry(gtype: str, coords: object, origin_lonlat) -> BaseGeometry:
-    """Build ONE feature's geometry, in ENU metres, unbuffered.
-
-    A pure geometry kernel: given a GeoJSON geometry ``type`` and its
-    ``coordinates``, this is the coordinate-projection + shapely-construction
-    call and nothing else. It never decides whether or how much to buffer --
-    that is orchestration (see jac/fences.jac's ``decide_geojson_fences``),
-    which calls this, then separately calls :func:`_buffer_geometry` if the
-    resolved buffer is greater than zero.
-    """
-    if gtype == "Polygon":
-        return _rings_to_enu(coords, origin_lonlat)
-    if gtype == "MultiPolygon":
-        parts = [_rings_to_enu(rings, origin_lonlat) for rings in coords]
-        return MultiPolygon(parts)
-    if gtype == "LineString":
-        return LineString(_project(coords, origin_lonlat))
-    if gtype == "MultiLineString":
-        return MultiLineString([_project(part, origin_lonlat) for part in coords])
-    raise GeofenceContractError(f"unsupported GeoJSON geometry type {gtype!r}")
-
-
-def _buffer_geometry(geom: BaseGeometry, buffer_m: float) -> BaseGeometry:
-    """The one place a bare ``.buffer()`` call happens for orchestration-
-    supplied geometries, so decision logic (in Jac) never touches shapely
-    math directly -- it only ever decides *whether* and *by how much*."""
-    return geom.buffer(float(buffer_m))
-
-
-# --------------------------------------------------------------------------
-# Jac import boundary. Everything above this point (Geofence, GeofenceIndex,
-# polygon_fence, corridor_fence, lonlat_to_enu, GeofenceContractError,
-# normalize_kind, CANONICAL_KINDS, _as_ring, _polygon_from_rings,
-# _geom_from_coords, _feature_geometry, _buffer_geometry, _POLYGONAL, _LINEAL)
-# is fully defined, so jac/fences.jac's ``import from tracker.geofence { ... }``
-# below can see all of it even though this module is still mid-import -- the
-# same proven trick tracker/contracts.py uses for jac/contracts.jac.
-# --------------------------------------------------------------------------
-
-import jaclang  # noqa: E402,F401  -- registers the .jac import hook
-
-from jac.fences import (  # noqa: E402
-    decide_build_index,
-    decide_geojson_fences,
-    decide_mapping_fence,
-    decide_ring_fence,
-)
-
-
 def geofence_from_ring(
     id: str,
     kind: str,
@@ -528,11 +480,14 @@ def geofence_from_ring(
     This is Abhi's ``Geofence.ring`` shape (``Tuple[Tuple[float, float], ...]``,
     closure not required). ``kind`` goes through :func:`normalize_kind`, so his
     vocabulary is accepted here and only canonical kinds leave.
-
-    The field/argument bookkeeping lives in jac/fences.jac's
-    ``decide_ring_fence``; this is a thin, backward-compatible wrapper over it.
     """
-    return decide_ring_fence(id, kind, label, ring, float(buffer_m))
+    return polygon_fence(
+        id=id,
+        kind=normalize_kind(kind),
+        label=label,
+        coords=_as_ring(ring),
+        buffer_m=float(buffer_m),
+    )
 
 
 def geofence_from_mapping(m: object, *, buffer_m: float | None = None) -> Geofence:
@@ -588,12 +543,138 @@ def geofence_from_mapping(m: object, *, buffer_m: float | None = None) -> Geofen
 
     Raises :class:`GeofenceContractError` naming the field that was missing.
     A geometry is never guessed or synthesised.
-
-    The field-resolution orchestration lives in jac/fences.jac's
-    ``decide_mapping_fence``; this is a thin, backward-compatible wrapper over
-    it.
     """
-    return decide_mapping_fence(m, buffer_m)
+    found_id = contracts.resolve_field(m, "id", default=None)
+    if found_id is None:
+        raise GeofenceContractError(
+            f"geofence is missing an id: none of {contracts.FIELD_ALIASES['id']} "
+            f"present on {type(m).__name__}"
+        )
+    fence_id = str(found_id)
+
+    found_geom = _resolve_field(m, _GEOM_FIELDS)
+    if found_geom is None:
+        raise GeofenceContractError(
+            f"geofence {fence_id!r} is missing a geometry: none of {_GEOM_FIELDS} "
+            f"present on {type(m).__name__}. Refusing to guess a geometry."
+        )
+
+    found_kind = contracts.resolve_field(m, "kind", default=None)
+    if found_kind is None:
+        raise GeofenceContractError(
+            f"geofence {fence_id!r} is missing a kind: none of "
+            f"{contracts.FIELD_ALIASES['kind']} present on {type(m).__name__}; "
+            f"expected one of {CANONICAL_KINDS} or a known alias"
+        )
+    kind = normalize_kind(found_kind)
+
+    found_label = contracts.resolve_field(m, "label", default=None)
+    label = str(found_label) if found_label is not None else fence_id
+
+    # `buf` is the EXPLICIT value only (field or argument), never defaulted --
+    # it is what gates the raw-shapely-line REQUIRED check below. `effective_buf`
+    # is `buf` with the per-kind default filled in, and is what actually gets
+    # applied to coordinate-built polygons and recorded as provenance.
+    if buffer_m is not None:
+        buf: float | None = float(buffer_m)
+    else:
+        found_buf = contracts.resolve_field(m, "buffer_m", default=None)
+        buf = float(found_buf) if found_buf is not None else None
+    effective_buf = buf if buf is not None else contracts.default_buffer_m(kind)
+
+    raw_geom = found_geom[1]
+    # isinstance FIRST: a shapely geometry is iterable-ish enough that coercing
+    # it as a coordinate sequence fails in a confusing way instead of a clear
+    # one, and the asdict round trip hands us exactly that.
+    if isinstance(raw_geom, BaseGeometry):
+        if raw_geom.is_empty:
+            raise GeofenceContractError(
+                f"geofence {fence_id!r} has an empty geometry ({raw_geom.geom_type})"
+            )
+        if raw_geom.area > 0.0:
+            geom: BaseGeometry = raw_geom          # already buffered; verbatim
+            final_buf = effective_buf
+        else:
+            if buf is None or buf <= 0.0:
+                raise GeofenceContractError(
+                    f"geofence {fence_id!r} has a zero-area "
+                    f"{raw_geom.geom_type} geometry and no explicit buffer_m; a "
+                    f"zero-buffered line can never contain a point. Pass "
+                    f"buffer_m > 0 (as a field or the buffer_m= argument) for "
+                    f"a corridor."
+                )
+            geom = raw_geom.buffer(buf)
+            final_buf = buf
+    else:
+        geom = _geom_from_coords(raw_geom)
+        if effective_buf > 0.0:
+            geom = geom.buffer(effective_buf)
+        final_buf = effective_buf
+
+    return Geofence(id=fence_id, kind=kind, label=label, geom=geom, buffer_m=final_buf)
+
+
+# --------------------------------------------------------------------------
+# GeoJSON loading (WGS84 lon/lat in, ENU-metre fences out)
+# --------------------------------------------------------------------------
+
+_POLYGONAL = ("Polygon", "MultiPolygon")
+_LINEAL = ("LineString", "MultiLineString")
+
+
+def _features_of(doc: Mapping[str, Any], path: str) -> list[Mapping[str, Any]]:
+    """Normalize FeatureCollection / Feature / bare geometry into features."""
+    doc_type = doc.get("type")
+    if doc_type == "FeatureCollection":
+        feats = doc.get("features")
+        if feats is None:
+            raise GeofenceContractError(
+                f"{path}: FeatureCollection has no 'features' member"
+            )
+        return list(feats)
+    if doc_type == "Feature":
+        return [doc]
+    if doc_type in _POLYGONAL + _LINEAL:
+        # Bare geometry: wrap it so one code path handles everything.
+        return [{"type": "Feature", "geometry": doc, "properties": {}}]
+    raise GeofenceContractError(
+        f"{path}: unsupported GeoJSON type {doc_type!r}; expected "
+        f"FeatureCollection, Feature, or one of {_POLYGONAL + _LINEAL}"
+    )
+
+
+def _prop_lookup(props: Mapping[str, Any], keys: Sequence[str]) -> Any:
+    """Case-insensitive first hit over ``keys`` in a properties dict."""
+    lowered = {_norm_token(k): v for k, v in props.items()}
+    for key in keys:
+        val = lowered.get(key)
+        if val is not None and val != "":
+            return val
+    return None
+
+
+def _project(coords: Sequence[Sequence[float]], origin) -> np.ndarray:
+    """Project one GeoJSON position list to ENU, dropping any elevation.
+
+    GeoJSON positions are legally ``[lon, lat]`` OR ``[lon, lat, alt]``, and
+    ``lonlat_to_enu`` reshapes to (-1, 2) -- which for an (N, 3) input with even
+    N does not raise, it reinterprets the buffer into garbage coordinates that
+    still pass "area > 0". So the third ordinate is sliced off *here*, before the
+    converter sees it. Not fixed inside ``lonlat_to_enu``: other modules import
+    it and its (-1, 2) contract is theirs too.
+    """
+    arr = np.asarray(coords, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        raise GeofenceContractError(
+            f"expected a list of [lon, lat] positions, got shape {arr.shape}"
+        )
+    return lonlat_to_enu(arr[:, :2], origin)
+
+
+def _rings_to_enu(rings: Sequence[Sequence[Sequence[float]]], origin) -> Polygon:
+    """One GeoJSON polygon (shell + holes), each ring projected separately."""
+    enu = [_project(r, origin) for r in rings]
+    return _polygon_from_rings(enu)
 
 
 def load_geojson_fences(
@@ -647,14 +728,104 @@ def load_geojson_fences(
     ``layer=None``, preserves the exact old behaviour -- bare, unprefixed ids --
     so existing callers are unaffected. See also :func:`build_index`, which
     namespaces and combines fences from several layers in one call.
-
-    The FeatureCollection walk and the per-feature kind/label/id/buffer
-    decisions live in jac/fences.jac's ``decide_geojson_fences``; this is a
-    thin, backward-compatible wrapper over it.
     """
-    return decide_geojson_fences(
-        os.fspath(path), origin_lonlat, float(default_buffer_m), kind, label, layer
-    )
+    path_s = os.fspath(path)
+    stem = os.path.splitext(os.path.basename(path_s))[0]
+    with open(path_s, "r", encoding="utf-8") as fh:
+        doc = json.load(fh)
+
+    buf = float(default_buffer_m)
+    out: list[Geofence] = []
+    seen: dict[str, int] = {}
+
+    for i, feat in enumerate(_features_of(doc, path_s)):
+        geometry = feat.get("geometry") if isinstance(feat, Mapping) else None
+        if not geometry:
+            raise GeofenceContractError(
+                f"{path_s}: feature {i} has no geometry (null-geometry features "
+                f"are not fences)"
+            )
+        gtype = geometry.get("type")
+        coords = geometry.get("coordinates")
+        if coords is None:
+            raise GeofenceContractError(
+                f"{path_s}: feature {i} geometry {gtype!r} has no 'coordinates'"
+            )
+        props = feat.get("properties") or {}
+
+        # --- geometry ----------------------------------------------------
+        if gtype == "Polygon":
+            geom: BaseGeometry = _rings_to_enu(coords, origin_lonlat)
+            if buf > 0.0:
+                geom = geom.buffer(buf)
+        elif gtype == "MultiPolygon":
+            parts = [_rings_to_enu(rings, origin_lonlat) for rings in coords]
+            geom = MultiPolygon(parts)
+            if buf > 0.0:
+                geom = geom.buffer(buf)
+        elif gtype in _LINEAL:
+            if buf <= 0.0:
+                raise GeofenceContractError(
+                    f"{path_s}: feature {i} is a {gtype} and default_buffer_m="
+                    f"{buf}. A zero-buffered line has no area and can never "
+                    f"contain anything, so this fence would silently never "
+                    f"fire. Pass default_buffer_m > 0 for a cable/route layer."
+                )
+            if gtype == "LineString":
+                line: BaseGeometry = LineString(_project(coords, origin_lonlat))
+            else:
+                line = MultiLineString(
+                    [_project(part, origin_lonlat) for part in coords]
+                )
+            geom = line.buffer(buf)
+        else:
+            raise GeofenceContractError(
+                f"{path_s}: feature {i} has unsupported geometry type {gtype!r}; "
+                f"supported: {_POLYGONAL + _LINEAL}"
+            )
+
+        # --- kind --------------------------------------------------------
+        if kind is not None:
+            fkind = normalize_kind(kind)
+        else:
+            raw_kind = _prop_lookup(props, _KIND_PROPERTY_KEYS)
+            if raw_kind is not None:
+                fkind = normalize_kind(raw_kind)
+            elif gtype in _LINEAL:
+                fkind = "cable"
+            else:
+                raise GeofenceContractError(
+                    f"{path_s}: feature {i} declares no kind (looked for "
+                    f"properties {_KIND_PROPERTY_KEYS}) and its geometry "
+                    f"({gtype}) does not imply one. Pass kind= explicitly."
+                )
+
+        # --- label and id ------------------------------------------------
+        if label is not None:
+            flabel = label
+        else:
+            raw_label = _prop_lookup(props, _LABEL_PROPERTY_KEYS)
+            flabel = str(raw_label) if raw_label is not None else stem
+
+        raw_id = _prop_lookup(props, _ID_PROPERTY_KEYS)
+        fid = str(raw_id) if raw_id is not None else f"{stem}-{i}"
+        if fid in seen:
+            seen[fid] += 1
+            fid = f"{fid}#{seen[fid]}"
+        else:
+            seen[fid] = 0
+
+        if layer is not None:
+            try:
+                fid = contracts.namespaced_id(layer, fid)
+            except contracts.ContractError as exc:
+                raise GeofenceContractError(str(exc)) from exc
+
+        out.append(
+            Geofence(id=fid, kind=fkind, label=flabel, geom=geom, buffer_m=buf)
+        )
+
+    return out
 
 
 def build_index(fences_by_layer: Mapping[str, Sequence[Geofence]]) -> GeofenceIndex:
@@ -675,11 +846,22 @@ def build_index(fences_by_layer: Mapping[str, Sequence[Geofence]]) -> GeofenceIn
     ``fences_by_layer`` is ``{layer_name: [Geofence, ...]}``. Layer names are
     only used for namespacing ids that need it; the fences themselves are not
     otherwise modified (kind/label/geom/buffer_m are preserved verbatim).
-
-    The namespacing/collision bookkeeping lives in jac/fences.jac's
-    ``decide_build_index``; this wrapper only builds the actual
-    :class:`GeofenceIndex` (a genuine geometry kernel: it constructs the
-    STRtree), which stays Python.
     """
-    namespaced = decide_build_index(dict(fences_by_layer))
+    namespaced: list[Geofence] = []
+    for layer_name, fences in fences_by_layer.items():
+        for f in fences:
+            if ":" in f.id:
+                namespaced.append(f)
+            else:
+                try:
+                    new_id = contracts.namespaced_id(layer_name, f.id)
+                except contracts.ContractError as exc:
+                    raise GeofenceContractError(str(exc)) from exc
+                namespaced.append(replace(f, id=new_id))
+
+    try:
+        contracts.assert_unique_ids(f.id for f in namespaced)
+    except contracts.ContractError as exc:
+        raise GeofenceContractError(str(exc)) from exc
+
     return GeofenceIndex(namespaced)
