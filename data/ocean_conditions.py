@@ -25,6 +25,17 @@ class OceanConditionsClient:
     def configured(self) -> bool:
         return bool(self.username and self.password)
 
+    @staticmethod
+    def _cache_key(lat: float, lon: float) -> tuple[int, int, str]:
+        now = datetime.now(timezone.utc)
+        return (round(lat * 4), round(lon * 4), now.date().isoformat())
+
+    def cached_current_grid(self, lat: float, lon: float) -> dict[str, Any] | None:
+        cached = self._cache.get(self._cache_key(lat, lon))
+        if cached and time.monotonic() - cached[0] < 1800:
+            return cached[1]
+        return None
+
     def current_grid(self, lat: float, lon: float) -> dict[str, Any]:
         if not self.configured:
             return {
@@ -33,7 +44,7 @@ class OceanConditionsClient:
                 "source": "Copernicus Marine Service",
             }
         now = datetime.now(timezone.utc)
-        key = (round(lat * 4), round(lon * 4), now.date().isoformat())
+        key = self._cache_key(lat, lon)
         cached = self._cache.get(key)
         if cached and time.monotonic() - cached[0] < 1800:
             return cached[1]

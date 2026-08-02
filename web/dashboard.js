@@ -124,7 +124,17 @@ const BoatCanvasRenderer = L.Canvas.extend({
     }
     if (!this._drawing || layer._empty()) return;
     const point = layer._point;
-    const size = Number(layer.options.boatSize) || 5;
+    const zoom = this._map.getZoom();
+    const densitySize = zoom <= 3
+      ? 0.9
+      : zoom <= 4
+        ? 1.25
+        : zoom <= 6
+          ? 1.8
+          : zoom <= 9
+            ? 3
+            : 5.5;
+    const size = layer.options.boatSelected ? 10 : densitySize;
     const bearing = (Number(layer.options.boatBearing) || 0) * Math.PI / 180;
     const ctx = this._ctx;
     ctx.save();
@@ -150,11 +160,49 @@ L.tileLayer(
   {
     subdomains: "abcd",
     maxZoom: 19,
+    updateWhenZooming: true,
+    updateWhenIdle: false,
+    keepBuffer: 3,
     attribution:
       '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · ' +
       '&copy; <a href="https://carto.com/attributions">CARTO</a>',
   }
 ).addTo(map);
+
+let cameraInFlight = false;
+let cameraSequence = 0;
+function stopMapFlight() {
+  cameraSequence += 1;
+  cameraInFlight = false;
+  map.stop();
+  restoreVesselPane();
+}
+function flyMap(action, durationSeconds) {
+  map.stop();
+  const sequence = ++cameraSequence;
+  cameraInFlight = true;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (sequence !== cameraSequence) {
+        resolve();
+        return;
+      }
+      cameraInFlight = false;
+      map.invalidateSize({ pan: false });
+      globalRenderer._update();
+      restoreVesselPane();
+      resolve();
+    };
+    action();
+    // Leaflet can emit a stale moveend from a just-cancelled flyTo. Waiting for
+    // the declared duration prevents paths and runners from rendering midway
+    // through the replacement camera animation.
+    window.setTimeout(finish, durationSeconds * 1000 + 120);
+  });
+}
 
 const bathymetryLayer = L.tileLayer.wms("https://wms.gebco.net/mapserv?", {
   layers: "GEBCO_LATEST",
@@ -176,18 +224,31 @@ const globalLayer = L.layerGroup();
 const globalProjectionLayer = L.layerGroup().addTo(globalLayer);
 map.createPane("vesselPane");
 map.getPane("vesselPane").style.zIndex = 390;
-map.getPane("vesselPane").style.transition = "opacity 140ms ease";
+map.getPane("vesselPane").style.transition = "opacity 80ms linear";
 const globalRenderer = new BoatCanvasRenderer({
   padding: 0.5,
   tolerance: 8,
   pane: "vesselPane",
 });
-map.on("zoomstart", () => {
+let vesselPaneRestoreTimer = null;
+function restoreVesselPane() {
+  if (vesselPaneRestoreTimer !== null) {
+    window.clearTimeout(vesselPaneRestoreTimer);
+    vesselPaneRestoreTimer = null;
+  }
+  map.getPane("vesselPane").style.opacity = "1";
+}
+function hideVesselPaneDuringZoom() {
   map.getPane("vesselPane").style.opacity = "0";
-});
+  if (vesselPaneRestoreTimer !== null) {
+    window.clearTimeout(vesselPaneRestoreTimer);
+  }
+  vesselPaneRestoreTimer = window.setTimeout(restoreVesselPane, 2200);
+}
+map.on("zoomstart", hideVesselPaneDuringZoom);
 map.on("zoomend", () => {
   globalRenderer._update();
-  map.getPane("vesselPane").style.opacity = "1";
+  if (!cameraInFlight) restoreVesselPane();
 });
 
 function drawZones(zones) {
@@ -404,10 +465,20 @@ function updateFinancialRisk(msg) {
 }
 
 function renderRiskPanel(risk, scope) {
+  const hasExposure =
+    Number(risk.low_usd) > 0
+    || Number(risk.high_usd) > 0
+    || (risk.items || []).length > 0;
+  const amount = hasExposure
+    ? `${formatUsd(risk.low_usd)}–${formatUsd(risk.high_usd)}`
+    : "No active exposure";
+  const detail = hasExposure
+    ? `${escapeHtml(scope)} · planning range, not realized loss`
+    : `${escapeHtml(scope)} · monitoring only`;
   els.riskSummary.innerHTML =
     `<div class="risk-total"><span class="hint">Estimated response budget</span>` +
-    `<span class="amount">${formatUsd(risk.low_usd)}–${formatUsd(risk.high_usd)}</span>` +
-    `<span class="hint">${escapeHtml(scope)} · planning range, not realized loss</span></div>`;
+    `<span class="amount">${amount}</span>` +
+    `<span class="hint">${detail}</span></div>`;
   els.riskList.innerHTML = "";
   for (const item of risk.items || []) {
     const div = document.createElement("div");
@@ -419,7 +490,8 @@ function renderRiskPanel(risk, scope) {
     els.riskList.appendChild(div);
   }
   if (!(risk.items || []).length) {
-    els.riskList.innerHTML = `<p class="hint">No active incident-response costs in this frame.</p>`;
+    els.riskList.innerHTML =
+      `<p class="hint">Monitoring live safety signals. No response action is currently triggered.</p>`;
   }
 }
 
@@ -551,7 +623,9 @@ async function loadBrief() {
     div.innerHTML =
       `<span class="concl-id">${b.concl_id}</span>` +
       `<span class="status-${b.status.toLowerCase()}">${b.status}</span> — ${escapeHtml(b.text)}` +
-      `<div class="provenance">model: ${b.model_used} · cost: $${b.cost_usd.toFixed(4)} · sources: ${b.source_ids.join(", ")}</div>`;
+      `<div class="provenance">model: ${b.model_used} · ` +
+      `${Number(b.cost_usd) > 0 ? `model cost: $${b.cost_usd.toFixed(4)}` : "no external model charge"} · ` +
+      `sources: ${b.source_ids.join(", ")}</div>`;
     els.briefList.appendChild(div);
   }
 }
@@ -589,7 +663,7 @@ function globalMarkerStyle(v, stale = false) {
   const color = selected ? "#7dd3fc" : stale ? "#94a3b8" : critical ? "#ef4444" : "#ffb020";
   return {
     boatShape: true,
-    boatSize: selected ? 10 : 6,
+    boatSelected: selected,
     boatBearing: Number(v.course) || 0,
     color,
     weight: selected ? 2.2 : v.dark ? 1.5 : 0.8,
@@ -652,38 +726,73 @@ function stopTrajectoryAnimation() {
   }
 }
 
+function trajectoryRunnerIcon(color) {
+  return L.divIcon({
+    className: "trajectory-runner-icon",
+    html:
+      `<svg viewBox="0 0 14 20" aria-hidden="true" style="color:${color}">` +
+      `<path d="M7 1 L12 9 L11 17 L7 14.5 L3 17 L2 9 Z"></path>` +
+      `</svg>`,
+    iconSize: [14, 20],
+    iconAnchor: [7, 10],
+  });
+}
+
 function startTrajectoryAnimation(runners) {
   stopTrajectoryAnimation();
-  const startedAt = performance.now();
-  const durationMs = 4800;
-  const travelEnd = 0.88;
-  const fadeStart = 0.8;
-  const animate = (now) => {
-    const phase = ((now - startedAt) % durationMs) / durationMs;
-    const progress = Math.min(1, phase / travelEnd);
-    const eased = progress * progress * (3 - 2 * progress);
-    const opacity = phase < fadeStart
-      ? 1
-      : Math.max(0, (travelEnd - phase) / (travelEnd - fadeStart));
-    for (const runner of runners) {
-      const scaled = eased * (runner.path.length - 1);
-      const segment = Math.min(runner.path.length - 2, Math.floor(scaled));
-      const fraction = scaled - segment;
-      const from = runner.path[segment];
-      const to = runner.path[segment + 1];
-      runner.marker.setLatLng([
-        from[0] + (to[0] - from[0]) * fraction,
-        from[1] + (to[1] - from[1]) * fraction,
-      ]);
-      runner.marker.setStyle({ opacity, fillOpacity: opacity });
+  let readinessFrames = 0;
+  const begin = () => {
+    if (
+      runners.some((runner) => runner.marker.getElement() === null)
+      && readinessFrames < 4
+    ) {
+      readinessFrames += 1;
+      state.trajectoryAnimationFrame = requestAnimationFrame(begin);
+      return;
     }
+    const startedAt = performance.now();
+    const durationMs = 4800;
+    const travelEnd = 0.88;
+    const fadeStart = 0.8;
+    const animate = (now) => {
+      const phase = ((now - startedAt) % durationMs) / durationMs;
+      const progress = Math.min(1, phase / travelEnd);
+      const eased = progress * progress * (3 - 2 * progress);
+      const opacity = phase < fadeStart
+        ? 1
+        : Math.max(0, (travelEnd - phase) / (travelEnd - fadeStart));
+      for (const runner of runners) {
+        const scaled = eased * (runner.path.length - 1);
+        const segment = Math.min(runner.path.length - 2, Math.floor(scaled));
+        const fraction = scaled - segment;
+        const from = runner.path[segment];
+        const to = runner.path[segment + 1];
+        const bearing = Math.atan2(
+          (to[1] - from[1]) * Math.cos(from[0] * Math.PI / 180),
+          to[0] - from[0]
+        ) * 180 / Math.PI;
+        runner.marker.setLatLng([
+          from[0] + (to[0] - from[0]) * fraction,
+          from[1] + (to[1] - from[1]) * fraction,
+        ]);
+        const element = runner.marker.getElement();
+        if (element) {
+          element.style.opacity = String(opacity);
+          const boat = element.querySelector("svg");
+          if (boat) boat.style.transform = `rotate(${bearing}deg)`;
+        }
+      }
+      state.trajectoryAnimationFrame = requestAnimationFrame(animate);
+    };
     state.trajectoryAnimationFrame = requestAnimationFrame(animate);
   };
-  state.trajectoryAnimationFrame = requestAnimationFrame(animate);
+  state.trajectoryAnimationFrame = requestAnimationFrame(begin);
 }
 
 function hideTrajectory({ restoreView = true } = {}) {
+  stopMapFlight();
   stopTrajectoryAnimation();
+  setTrajectoryModesDisabled(false);
   state.trajectoryRenderId += 1;
   const returnView = state.preSelectionView;
   state.preSelectionView = null;
@@ -694,6 +803,7 @@ function hideTrajectory({ restoreView = true } = {}) {
   state.selectedMmsi = null;
   if (selectedMarker) {
     selectedMarker.setStyle(globalMarkerStyle(selectedMarker._fix || {}));
+    selectedMarker.closeTooltip();
   }
   state.selectedVessel = null;
   globalProjectionLayer.clearLayers();
@@ -701,13 +811,17 @@ function hideTrajectory({ restoreView = true } = {}) {
   if (els.trajectoryPanel.parentElement !== els.mapWrap) {
     els.mapWrap.appendChild(els.trajectoryPanel);
   }
+  map.invalidateSize({ pan: false });
   if (state.lastFrameRisk) renderRiskPanel(state.lastFrameRisk, "Current frame");
   if (restoreView && returnView && state.globalLayerOn) {
-    map.flyTo(returnView.center, returnView.zoom, {
-      animate: true,
-      duration: 1.1,
-      easeLinearity: 0.2,
-    });
+    flyMap(
+      () => map.flyTo(returnView.center, returnView.zoom, {
+        animate: true,
+        duration: 1.45,
+        easeLinearity: 0.18,
+      }),
+      1.45
+    );
   }
 }
 
@@ -776,9 +890,32 @@ function refreshSelectedVessel(v) {
   renderRiskPanel(risk, v.name || `MMSI ${v.mmsi}`);
 }
 
-async function showTrajectory(v) {
+function trajectoryBounds(scenarios, start) {
+  const bounds = L.latLngBounds(
+    scenarios.flatMap((scenario) => scenario.path).concat([start])
+  );
+  for (const scenario of scenarios) {
+    const end = scenario.path[scenario.path.length - 1];
+    const radiusM = Math.max(0, Number(scenario.uncertainty_radius_m) || 0);
+    const latRadius = radiusM / 111320;
+    const lonRadius = latRadius /
+      Math.max(0.1, Math.cos(Number(end[0]) * Math.PI / 180));
+    bounds.extend([Number(end[0]) - latRadius, Number(end[1]) - lonRadius]);
+    bounds.extend([Number(end[0]) + latRadius, Number(end[1]) + lonRadius]);
+  }
+  return bounds;
+}
+
+function setTrajectoryModesDisabled(disabled) {
+  for (const button of document.querySelectorAll(".trajectory-mode")) {
+    button.disabled = disabled;
+  }
+}
+
+async function showTrajectory(v, { adjustCamera = true } = {}) {
   const renderId = ++state.trajectoryRenderId;
-  if (v.dark && state.selectedMmsi === null) {
+  if (adjustCamera) stopMapFlight();
+  if (state.selectedMmsi === null) {
     const center = map.getCenter();
     state.preSelectionView = {
       center: [center.lat, center.lng],
@@ -830,33 +967,30 @@ async function showTrajectory(v) {
   const modeSwitch = els.trajectoryPanel.querySelector(".trajectory-mode-switch");
   modeSwitch.classList.toggle("hidden", !v.dark);
   if (!v.dark) {
+    setTrajectoryModesDisabled(false);
     els.trajectoryHeading.textContent = "AIS transmitting · live contact";
     els.trajectoryOptions.innerHTML =
       `<div class="trajectory-option"><span class="trajectory-swatch"></span>` +
       `<span>Current reported position</span><span class="trajectory-distance">LIVE</span></div>`;
     els.trajectoryNote.textContent =
       "No predicted trajectory is shown while this vessel is actively transmitting AIS.";
+    if (adjustCamera) {
+      await flyMap(
+        () => map.flyTo(start, Math.max(map.getZoom(), 14), {
+          animate: true,
+          duration: 1.05,
+          easeLinearity: 0.18,
+        }),
+        1.05
+      );
+    }
     return;
   }
   els.trajectoryHeading.textContent = "Calculating Monte Carlo branches…";
+  setTrajectoryModesDisabled(true);
   els.trajectoryOptions.innerHTML = "";
   els.trajectoryNote.textContent =
     "Using observed AIS motion, a bounded decaying turn model, silence duration, ocean currents, and available coastline constraints.";
-  const targetZoom = Math.max(map.getZoom(), 14);
-  const mapCenterPoint = L.point(map.getSize().x / 2, map.getSize().y / 2);
-  const vesselPoint = map.latLngToContainerPoint(start);
-  const needsCameraMove =
-    map.getZoom() < targetZoom || vesselPoint.distanceTo(mapCenterPoint) > 30;
-  let cameraReady = Promise.resolve();
-  if (needsCameraMove) {
-    map.flyTo(start, targetZoom, {
-      animate: true,
-      duration: 1.1,
-      easeLinearity: 0.2,
-    });
-    cameraReady = new Promise((resolve) => window.setTimeout(resolve, 1150));
-  }
-
   const cacheKey = `${v.mmsi}:${v.last_seen}`;
   let prediction = state.predictionCache.get(cacheKey);
   try {
@@ -866,12 +1000,12 @@ async function showTrajectory(v) {
     }
   } catch (_err) {
     if (state.trajectoryRenderId === renderId) {
+      setTrajectoryModesDisabled(false);
       els.trajectoryHeading.textContent = "Prediction unavailable";
       els.trajectoryNote.textContent = "The dark-contact model could not be calculated.";
     }
     return;
   }
-  await cameraReady;
   if (state.trajectoryRenderId !== renderId || state.selectedMmsi !== v.mmsi) return;
 
   const colors = ["#2dd4bf", "#5ec8d8", "#a78bfa", "#f59e0b", "#f472b6",
@@ -880,6 +1014,20 @@ async function showTrajectory(v) {
   const scenarios = state.trajectoryMode === "single"
     ? allScenarios.slice(0, 1)
     : allScenarios;
+  const bounds = trajectoryBounds(scenarios, start);
+  if (adjustCamera && bounds.isValid()) {
+    await flyMap(
+      () => map.flyToBounds(bounds, {
+        padding: [64, 64],
+        maxZoom: 15,
+        animate: true,
+        duration: 1.15,
+        easeLinearity: 0.18,
+      }),
+      1.15
+    );
+  }
+  if (state.trajectoryRenderId !== renderId || state.selectedMmsi !== v.mmsi) return;
   const runners = [];
   els.trajectoryHeading.textContent =
     `${prediction.samples} Monte Carlo runs · ${allScenarios.length} branches · ` +
@@ -918,15 +1066,13 @@ async function showTrajectory(v) {
       interactive: false,
       className: "trajectory-radius",
     }).addTo(globalProjectionLayer);
-    const runner = L.circleMarker(start, {
-      radius: 4,
-      color,
-      weight: 2,
-      fillColor: "#ffffff",
-      fillOpacity: 1,
+    const runner = L.marker(start, {
+      icon: trajectoryRunnerIcon(color),
       interactive: false,
-      className: "trajectory-runner",
+      keyboard: false,
+      zIndexOffset: 1000,
     }).addTo(globalProjectionLayer);
+    runner._trajectoryRunner = true;
     runners.push({ marker: runner, path });
 
     const row = document.createElement("div");
@@ -945,6 +1091,8 @@ async function showTrajectory(v) {
   const currentText = current
     ? `Copernicus surface current: ${Number(current.speed_mps).toFixed(2)} m/s ` +
       `toward ${Number(current.bearing_deg).toFixed(0)}°. `
+    : prediction.ocean_conditions?.pending
+      ? "Copernicus current is warming asynchronously; this result uses AIS motion only. "
     : "";
   const timingText =
     `Path spans ${Number(prediction.path_minutes_from_last_fix).toFixed(0)} minutes ` +
@@ -955,29 +1103,7 @@ async function showTrajectory(v) {
     `${drivers.length ? `Uncertainty increased by: ${drivers.join(", ")}. ` : ""}` +
     `${unavailable.length ? `Unavailable: ${unavailable.join(", ")}.` : ""}`;
   startTrajectoryAnimation(runners);
-  if (scenarios.length) {
-    const bounds = L.latLngBounds(
-      scenarios.flatMap((scenario) => scenario.path).concat([start])
-    );
-    for (const scenario of scenarios) {
-      const end = scenario.path[scenario.path.length - 1];
-      const radiusM = Math.max(0, Number(scenario.uncertainty_radius_m) || 0);
-      const latRadius = radiusM / 111320;
-      const lonRadius = latRadius /
-        Math.max(0.1, Math.cos(Number(end[0]) * Math.PI / 180));
-      bounds.extend([Number(end[0]) - latRadius, Number(end[1]) - lonRadius]);
-      bounds.extend([Number(end[0]) + latRadius, Number(end[1]) + lonRadius]);
-    }
-    if (bounds.isValid()) {
-      map.flyToBounds(bounds, {
-        padding: [64, 64],
-        maxZoom: 15,
-        animate: true,
-        duration: 1.05,
-        easeLinearity: 0.18,
-      });
-    }
-  }
+  setTrajectoryModesDisabled(false);
 }
 
 function applyGlobalFix(v) {
@@ -1021,11 +1147,14 @@ function applyGlobalFix(v) {
 els.trajectoryClose.addEventListener("click", hideTrajectory);
 for (const button of document.querySelectorAll(".trajectory-mode")) {
   button.addEventListener("click", () => {
+    if (button.disabled) return;
     state.trajectoryMode = button.dataset.trajectoryMode;
     for (const other of document.querySelectorAll(".trajectory-mode")) {
       other.classList.toggle("active", other === button);
     }
-    if (state.selectedVessel) showTrajectory(state.selectedVessel);
+    if (state.selectedVessel) {
+      showTrajectory(state.selectedVessel, { adjustCamera: false });
+    }
   });
 }
 

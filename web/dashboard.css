@@ -273,6 +273,10 @@ html, body {
   background: rgba(94, 200, 216, 0.14);
   color: var(--cyan);
 }
+.trajectory-mode:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
 .trajectory-heading {
   color: var(--text);
   font-size: 0.7rem;
@@ -318,8 +322,26 @@ html, body {
 .trajectory-radius {
   animation: trajectory-radius-pulse 1.8s ease-in-out infinite;
 }
-.trajectory-runner {
-  filter: drop-shadow(0 0 5px currentColor);
+.trajectory-runner-icon {
+  background: none !important;
+  border: 0 !important;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+.trajectory-runner-icon svg {
+  display: block;
+  width: 14px;
+  height: 20px;
+  overflow: visible;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 0 4px currentColor);
+}
+.trajectory-runner-icon path {
+  fill: #ffffff;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
 }
 @keyframes trajectory-flow {
   to { stroke-dashoffset: -22; }

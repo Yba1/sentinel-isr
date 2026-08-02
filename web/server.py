@@ -219,6 +219,8 @@ def build_app(cache: dict) -> web.Application:
     gfw_token = os.environ.get("GFW_API_TOKEN", "")
     app["gfw_client"] = GlobalFishingWatchClient(gfw_token) if gfw_token else None
     app["ocean_client"] = OceanConditionsClient()
+    app["ocean_tasks"] = set()
+    app["ocean_pending"] = set()
 
     async def start_global_feed(app: web.Application) -> None:
         if app["global_feed"] is not None:
@@ -423,14 +425,37 @@ def build_app(cache: dict) -> web.Application:
                 status=409,
             )
         loop = asyncio.get_running_loop()
-        def calculate_prediction() -> dict:
-            ocean = app["ocean_client"].current_grid(
-                float(vessel["lat"]),
-                float(vessel["lon"]),
-            )
-            return predict_dark_vessel(vessel, ocean)
+        lat = float(vessel["lat"])
+        lon = float(vessel["lon"])
+        client = app["ocean_client"]
+        ocean = client.cached_current_grid(lat, lon)
+        if ocean is None:
+            ocean = {
+                "configured": client.configured,
+                "available": False,
+                "pending": client.configured,
+                "source": "Copernicus Marine Service",
+            }
+            cache_region = (round(lat * 4), round(lon * 4))
+            if client.configured and cache_region not in app["ocean_pending"]:
+                app["ocean_pending"].add(cache_region)
 
-        prediction = await loop.run_in_executor(None, calculate_prediction)
+                async def warm_ocean() -> None:
+                    try:
+                        await asyncio.to_thread(client.current_grid, lat, lon)
+                    finally:
+                        app["ocean_pending"].discard(cache_region)
+
+                task = asyncio.create_task(warm_ocean())
+                app["ocean_tasks"].add(task)
+                task.add_done_callback(app["ocean_tasks"].discard)
+
+        prediction = await loop.run_in_executor(
+            None,
+            predict_dark_vessel,
+            vessel,
+            ocean,
+        )
         return web.json_response(prediction)
 
     async def api_context_layers(request: web.Request) -> web.Response:
