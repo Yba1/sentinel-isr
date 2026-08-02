@@ -32,6 +32,7 @@ const els = {
   assocBadge: document.getElementById("assoc-badge"),
   btnRetract: document.getElementById("btn-retract"),
   btnGlobalLayer: document.getElementById("btn-global-layer"),
+  btnBathymetry: document.getElementById("btn-bathymetry"),
   globalBadge: document.getElementById("global-badge"),
   banner: document.getElementById("banner"),
   briefList: document.getElementById("brief-list"),
@@ -79,6 +80,7 @@ const state = {
   localView: null,
   preSelectionView: null,
   lastFrameRisk: null,
+  bathymetryOn: false,
 };
 
 const tracks = new Map(); // track_id -> { marker, trailGroup, ellipseLayer, positions, color }
@@ -153,6 +155,20 @@ L.tileLayer(
       '&copy; <a href="https://carto.com/attributions">CARTO</a>',
   }
 ).addTo(map);
+
+const bathymetryLayer = L.tileLayer.wms("https://wms.gebco.net/mapserv?", {
+  layers: "GEBCO_LATEST",
+  format: "image/png",
+  transparent: true,
+  opacity: 0.3,
+  attribution: "GEBCO 2026",
+});
+els.btnBathymetry.addEventListener("click", () => {
+  state.bathymetryOn = !state.bathymetryOn;
+  els.btnBathymetry.classList.toggle("active", state.bathymetryOn);
+  if (state.bathymetryOn) bathymetryLayer.addTo(map);
+  else map.removeLayer(bathymetryLayer);
+});
 
 const zonesLayer = L.featureGroup().addTo(map); // needs getBounds(); plain layerGroup lacks it
 const localLayer = L.layerGroup().addTo(map);
@@ -569,18 +585,64 @@ document.querySelector('[data-tab="jtms"]').addEventListener("click", () => { if
 
 function globalMarkerStyle(v, stale = false) {
   const critical = (v.risk?.items || []).some((item) => item.severity === "critical");
-  const color = stale ? "#94a3b8" : critical ? "#ef4444" : "#ffb020";
+  const selected = Number(v.mmsi) === state.selectedMmsi;
+  const color = selected ? "#7dd3fc" : stale ? "#94a3b8" : critical ? "#ef4444" : "#ffb020";
   return {
     boatShape: true,
-    boatSize: 5,
+    boatSize: selected ? 10 : 6,
     boatBearing: Number(v.course) || 0,
     color,
-    weight: v.dark ? 1.5 : 0.8,
+    weight: selected ? 2.2 : v.dark ? 1.5 : 0.8,
     opacity: stale ? 0.45 : 0.95,
     fillColor: color,
-    fillOpacity: v.dark ? 0.08 : 0.78,
-    dashArray: v.dark ? "3 2" : null,
+    fillOpacity: selected ? 0.82 : v.dark ? 0.08 : 0.78,
+    dashArray: selected ? null : v.dark ? "3 2" : null,
   };
+}
+
+function renderOceanCurrents(ocean) {
+  if (!ocean?.available) return;
+  const driftSeconds = 1800;
+  for (const vector of ocean.vectors || []) {
+    const lat = Number(vector.lat);
+    const lon = Number(vector.lon);
+    const end = [
+      lat + Number(vector.north_mps) * driftSeconds / 111320,
+      lon + Number(vector.east_mps) * driftSeconds /
+        (111320 * Math.max(0.1, Math.cos(lat * Math.PI / 180))),
+    ];
+    L.polyline([[lat, lon], end], {
+      color: "#38bdf8",
+      weight: 1.5,
+      opacity: 0.65,
+      interactive: false,
+      className: "ocean-current-vector",
+    }).addTo(globalProjectionLayer);
+    L.circleMarker(end, {
+      radius: 2,
+      color: "#7dd3fc",
+      weight: 1,
+      fillColor: "#7dd3fc",
+      fillOpacity: 0.8,
+      interactive: false,
+    }).addTo(globalProjectionLayer);
+    L.marker([lat, lon], {
+      icon: L.divIcon({
+        className: "current-arrow-icon",
+        html:
+          `<span style="transform:rotate(${Number(vector.bearing_deg) - 90}deg)">➤</span>`,
+        iconSize: [14, 14],
+        iconAnchor: [7, 7],
+      }),
+      interactive: true,
+      keyboard: false,
+    })
+      .bindTooltip(
+        `Copernicus current · ${Number(vector.speed_mps).toFixed(2)} m/s · ` +
+        `${Number(vector.bearing_deg).toFixed(0)}°`
+      )
+      .addTo(globalProjectionLayer);
+  }
 }
 
 function stopTrajectoryAnimation() {
@@ -628,7 +690,11 @@ function hideTrajectory({ restoreView = true } = {}) {
   if (state.selectedMmsi !== null) {
     postJson("/api/global/pin", { mmsi: null }).catch(() => {});
   }
+  const selectedMarker = globalMarkers.get(state.selectedMmsi);
   state.selectedMmsi = null;
+  if (selectedMarker) {
+    selectedMarker.setStyle(globalMarkerStyle(selectedMarker._fix || {}));
+  }
   state.selectedVessel = null;
   globalProjectionLayer.clearLayers();
   els.trajectoryPanel.classList.add("hidden");
@@ -719,10 +785,16 @@ async function showTrajectory(v) {
       zoom: map.getZoom(),
     };
   }
+  const previousMarker = globalMarkers.get(state.selectedMmsi);
   if (state.selectedMmsi !== v.mmsi) {
     postJson("/api/global/pin", { mmsi: v.mmsi }).catch(() => {});
   }
   state.selectedMmsi = v.mmsi;
+  if (previousMarker && previousMarker !== globalMarkers.get(v.mmsi)) {
+    previousMarker.setStyle(globalMarkerStyle(previousMarker._fix || {}));
+  }
+  const selectedMarker = globalMarkers.get(v.mmsi);
+  if (selectedMarker) selectedMarker.setStyle(globalMarkerStyle(v));
   stopTrajectoryAnimation();
   globalProjectionLayer.clearLayers();
   const start = [Number(v.lat), Number(v.lon)];
@@ -769,8 +841,8 @@ async function showTrajectory(v) {
   els.trajectoryHeading.textContent = "Calculating Monte Carlo branches…";
   els.trajectoryOptions.innerHTML = "";
   els.trajectoryNote.textContent =
-    "Using the last AIS position, speed, heading, turn rate, track history, silence duration, and available coastline constraints.";
-  const targetZoom = Math.max(map.getZoom(), 11);
+    "Using observed AIS motion, a bounded decaying turn model, silence duration, ocean currents, and available coastline constraints.";
+  const targetZoom = Math.max(map.getZoom(), 14);
   const mapCenterPoint = L.point(map.getSize().x / 2, map.getSize().y / 2);
   const vesselPoint = map.latLngToContainerPoint(start);
   const needsCameraMove =
@@ -811,8 +883,9 @@ async function showTrajectory(v) {
   const runners = [];
   els.trajectoryHeading.textContent =
     `${prediction.samples} Monte Carlo runs · ${allScenarios.length} branches · ` +
-    `${prediction.horizon_minutes} minute horizon`;
+    `${prediction.horizon_minutes} minute outlook`;
   els.trajectoryOptions.innerHTML = "";
+  renderOceanCurrents(prediction.ocean_conditions);
 
   if ((v.history || []).length > 1) {
     L.polyline(v.history, {
@@ -868,14 +941,41 @@ async function showTrajectory(v) {
     .filter(([, available]) => !available)
     .map(([name]) => name.replaceAll("_", " "));
   const drivers = prediction.uncertainty_drivers || [];
+  const current = prediction.ocean_conditions?.center;
+  const currentText = current
+    ? `Copernicus surface current: ${Number(current.speed_mps).toFixed(2)} m/s ` +
+      `toward ${Number(current.bearing_deg).toFixed(0)}°. `
+    : "";
+  const timingText =
+    `Path spans ${Number(prediction.path_minutes_from_last_fix).toFixed(0)} minutes ` +
+    `from the last AIS fix, including ${Math.round(Number(v.age_s) / 60)} minutes silent. `;
   els.trajectoryNote.textContent =
+    currentText +
+    timingText +
     `${drivers.length ? `Uncertainty increased by: ${drivers.join(", ")}. ` : ""}` +
     `${unavailable.length ? `Unavailable: ${unavailable.join(", ")}.` : ""}`;
   startTrajectoryAnimation(runners);
   if (scenarios.length) {
-    const bounds = L.latLngBounds(scenarios.flatMap((scenario) => scenario.path));
-    if (bounds.isValid() && !map.getBounds().contains(bounds)) {
-      map.flyToBounds(bounds.pad(0.25), { maxZoom: targetZoom, duration: 0.7 });
+    const bounds = L.latLngBounds(
+      scenarios.flatMap((scenario) => scenario.path).concat([start])
+    );
+    for (const scenario of scenarios) {
+      const end = scenario.path[scenario.path.length - 1];
+      const radiusM = Math.max(0, Number(scenario.uncertainty_radius_m) || 0);
+      const latRadius = radiusM / 111320;
+      const lonRadius = latRadius /
+        Math.max(0.1, Math.cos(Number(end[0]) * Math.PI / 180));
+      bounds.extend([Number(end[0]) - latRadius, Number(end[1]) - lonRadius]);
+      bounds.extend([Number(end[0]) + latRadius, Number(end[1]) + lonRadius]);
+    }
+    if (bounds.isValid()) {
+      map.flyToBounds(bounds, {
+        padding: [64, 64],
+        maxZoom: 15,
+        animate: true,
+        duration: 1.05,
+        easeLinearity: 0.18,
+      });
     }
   }
 }

@@ -12,7 +12,12 @@
   via its public ArcGIS FeatureServer
 - Optional vessel identity and activity enrichment:
   [Global Fishing Watch APIs](https://globalfishingwatch.org/our-apis/)
+- Surface-current analysis and forecast:
+  [Copernicus Marine Service](https://marine.copernicus.eu/)
+- Optional bathymetry overlay: GEBCO Bathymetric Compilation Group 2026,
+  [GEBCO_2026 Grid](https://www.gebco.net/data-products-gridded-bathymetry-data/gebco2026-grid)
 
 Scenario and sanctions records are demonstration data, not live intelligence.
+GEBCO data are contextual and must not be used for navigation or safety at sea.
 Consult each provider's current terms before redistributing or deploying the
 datasets outside this project.

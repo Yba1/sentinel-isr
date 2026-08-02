@@ -23,7 +23,7 @@ from data.maritime_context import maritime_context
 
 AISSTREAM_WS_URL = "wss://stream.aisstream.io/v0/stream"
 CONNECT_TIMEOUT_S = 8.0
-MAX_TRACKED = int(os.getenv("AEGIS_MAX_ACTIVE_VESSELS", "20000"))
+MAX_TRACKED = int(os.getenv("AEGIS_MAX_ACTIVE_VESSELS", "100000"))
 DARK_AFTER_S = 45.0  # no fresh position report: render as a coasting contact
 MAX_HISTORY = 20
 MAX_TOMBSTONES = 50000
@@ -85,6 +85,7 @@ class GlobalAisFeed:
         )
 
     def _record(self, mmsi: int, fix: dict) -> None:
+        received_at = time.time()
         becoming_active = mmsi not in self._active_order
         if becoming_active and len(self._active_order) >= MAX_TRACKED:
             oldest = next(
@@ -106,17 +107,27 @@ class GlobalAisFeed:
         if was_positioned and self._identity_changed(mmsi, previous, fix):
             self.identity_switches += 1
         history = list(previous.get("history", []))
+        history_samples = list(previous.get("history_samples", []))
         if "lat" in fix and "lon" in fix:
             point = [float(fix["lat"]), float(fix["lon"])]
             if not history or history[-1] != point:
                 history.append(point)
                 history = history[-MAX_HISTORY:]
+                history_samples.append({
+                    "lat": point[0],
+                    "lon": point[1],
+                    "time": received_at,
+                    "course": fix.get("course"),
+                    "speed_kn": fix.get("speed_kn"),
+                })
+                history_samples = history_samples[-MAX_HISTORY:]
         row = {
             **previous,
             **fix,
             "mmsi": mmsi,
             "history": history,
-            "last_seen": time.time(),
+            "history_samples": history_samples,
+            "last_seen": received_at,
         }
         row.pop("_annotation_key", None)
         row.pop("_annotation", None)
@@ -236,11 +247,11 @@ class GlobalAisFeed:
             ),
             "lat": round(float(lat), 4),
             "lon": round(float(lon), 4),
-            "course": report.get("Cog", 0.0),
-            "speed_kn": report.get("Sog", 0.0),
-            "heading": report.get("TrueHeading", 0.0),
-            "navigation_status": report.get("NavigationalStatus", 0),
-            "rate_of_turn": report.get("RateOfTurn", 0.0),
+            "course": report.get("Cog"),
+            "speed_kn": report.get("Sog"),
+            "heading": report.get("TrueHeading"),
+            "navigation_status": report.get("NavigationalStatus"),
+            "rate_of_turn": report.get("RateOfTurn"),
         })
         self.position_reports += 1
 

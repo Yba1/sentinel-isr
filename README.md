@@ -12,8 +12,9 @@ when its transmitter goes dark.
 - Protected-zone entry, identity changes, and reacquisition create evidence-backed alerts.
 - Each active safety event receives a transparent incident-response budget range.
   These figures are planning estimates—not claimed losses or cargo valuations.
-- Clicking a global contact shows course, speed, and four 30-minute trajectory
-  scenarios with widening uncertainty.
+- Clicking an active contact shows its live AIS details. Dark contacts receive
+  600-run Monte Carlo predictions with a data-driven number of probability
+  branches, optional Copernicus current drift, and widening uncertainty.
 
 ## Architecture
 
@@ -49,6 +50,8 @@ Optional `.env` values:
 ```dotenv
 AISSTREAM_API_KEY=
 GFW_API_TOKEN=
+COPERNICUS_MARINE_USERNAME=
+COPERNICUS_MARINE_PASSWORD=
 AEGIS_PACK=s02_synthetic_demo
 AEGIS_FRAMES=-1
 AEGIS_LLM=mockllm
@@ -91,9 +94,11 @@ Every bundled reference dataset participates at runtime:
   and registry-derived classifications.
 - All four scenario packs remain selectable from the dashboard.
 
-The same layers are drawn on the map, and each live-contact click combines
-reference matches, AIS history, trajectory scenarios, and a transparent
-response-cost range.
+The reference layers remain active in backend analysis without cluttering the
+live map. Contact details combine reference matches, AIS history, and a
+transparent response-cost range; dark contacts additionally show probabilistic
+trajectory branches. GEBCO bathymetry is available as an operator-controlled
+visual overlay.
 
 Aegis includes an organizer-approved rewrite of prior maritime-tracking work
 from [Yba1/sentinel-isr](https://github.com/Yba1/sentinel-isr). The runtime has

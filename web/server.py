@@ -48,6 +48,7 @@ from data.global_ais import GlobalAisFeed, global_snapshot
 from data.dark_prediction import predict_dark_vessel
 from data.global_fishing_watch import GlobalFishingWatchClient
 from data.maritime_context import maritime_context
+from data.ocean_conditions import OceanConditionsClient
 from aegis.graph import build_mission
 from aegis.main import run_frame_scored
 from aegis.fusion import assoc_provenance as main_assoc_source
@@ -217,6 +218,7 @@ def build_app(cache: dict) -> web.Application:
     app["global_feed"] = GlobalAisFeed(api_key) if api_key else None
     gfw_token = os.environ.get("GFW_API_TOKEN", "")
     app["gfw_client"] = GlobalFishingWatchClient(gfw_token) if gfw_token else None
+    app["ocean_client"] = OceanConditionsClient()
 
     async def start_global_feed(app: web.Application) -> None:
         if app["global_feed"] is not None:
@@ -421,7 +423,14 @@ def build_app(cache: dict) -> web.Application:
                 status=409,
             )
         loop = asyncio.get_running_loop()
-        prediction = await loop.run_in_executor(None, predict_dark_vessel, vessel)
+        def calculate_prediction() -> dict:
+            ocean = app["ocean_client"].current_grid(
+                float(vessel["lat"]),
+                float(vessel["lon"]),
+            )
+            return predict_dark_vessel(vessel, ocean)
+
+        prediction = await loop.run_in_executor(None, calculate_prediction)
         return web.json_response(prediction)
 
     async def api_context_layers(request: web.Request) -> web.Response:
