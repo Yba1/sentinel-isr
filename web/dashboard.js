@@ -61,7 +61,11 @@ const state = {
   globalLayerOn: false,
   globalLive: false, // true once a real aisstream.io fix has arrived
   globalVessels: [],
+  globalStatus: {},
   selectedMmsi: null,
+  selectedVessel: null,
+  trajectoryMode: "triple",
+  trajectoryAnimationFrame: null,
   localView: null,
   lastFrameRisk: null,
 };
@@ -92,7 +96,7 @@ const zonesLayer = L.featureGroup().addTo(map); // needs getBounds(); plain laye
 const localLayer = L.layerGroup().addTo(map);
 const globalLayer = L.layerGroup();
 const globalProjectionLayer = L.layerGroup().addTo(globalLayer);
-const contextReferenceLayer = L.layerGroup().addTo(map);
+const contextReferenceLayer = L.layerGroup();
 
 function drawZones(zones) {
   zonesLayer.clearLayers();
@@ -110,7 +114,7 @@ function drawZones(zones) {
       .bindTooltip(`${z.name} (${z.kind})`)
       .addTo(zonesLayer);
   }
-  if (zones && zones.length) {
+  if (zones && zones.length && !state.globalLayerOn) {
     state.zonesDrawn = true;
     map.fitBounds(zonesLayer.getBounds().pad(6), { animate: false });
   }
@@ -507,16 +511,45 @@ function trajectoryScenarios(v) {
   const course = Number(v.course) || 0;
   const speed = Math.max(0, Number(v.speed_kn) || 0);
   const runNm = speed * 0.5;
-  return [
+  const scenarios = [
     { label: "Maintain course", bearing: course, distance: runNm, color: "#2dd4bf" },
     { label: "Turn +35°", bearing: course + 35, distance: runNm, color: "#5ec8d8" },
     { label: "Turn −35°", bearing: course - 35, distance: runNm, color: "#a78bfa" },
-    { label: "Engine stop / drift", bearing: course + 110, distance: Math.max(0.6, runNm * 0.12), color: "#ef4444" },
   ];
+  return state.trajectoryMode === "single" ? scenarios.slice(0, 1) : scenarios;
+}
+
+function stopTrajectoryAnimation() {
+  if (state.trajectoryAnimationFrame !== null) {
+    cancelAnimationFrame(state.trajectoryAnimationFrame);
+    state.trajectoryAnimationFrame = null;
+  }
+}
+
+function startTrajectoryAnimation(runners) {
+  stopTrajectoryAnimation();
+  const startedAt = performance.now();
+  const durationMs = 4800;
+  const animate = (now) => {
+    const phase = ((now - startedAt) % durationMs) / durationMs;
+    const eased = phase < 0.5
+      ? 2 * phase * phase
+      : 1 - Math.pow(-2 * phase + 2, 2) / 2;
+    for (const runner of runners) {
+      runner.marker.setLatLng([
+        runner.start[0] + (runner.end[0] - runner.start[0]) * eased,
+        runner.start[1] + (runner.end[1] - runner.start[1]) * eased,
+      ]);
+    }
+    state.trajectoryAnimationFrame = requestAnimationFrame(animate);
+  };
+  state.trajectoryAnimationFrame = requestAnimationFrame(animate);
 }
 
 function hideTrajectory() {
+  stopTrajectoryAnimation();
   state.selectedMmsi = null;
+  state.selectedVessel = null;
   globalProjectionLayer.clearLayers();
   els.trajectoryPanel.classList.add("hidden");
   if (state.lastFrameRisk) renderRiskPanel(state.lastFrameRisk, "Current frame");
@@ -524,6 +557,8 @@ function hideTrajectory() {
 
 function showTrajectory(v) {
   state.selectedMmsi = v.mmsi;
+  state.selectedVessel = v;
+  stopTrajectoryAnimation();
   globalProjectionLayer.clearLayers();
   const start = [Number(v.lat), Number(v.lon)];
   const scenarios = trajectoryScenarios(v);
@@ -562,6 +597,7 @@ function showTrajectory(v) {
     `<div class="trajectory-cost">${formatUsd(risk.low_usd)}–${formatUsd(risk.high_usd)}</div>`;
   renderRiskPanel(risk, v.name || `MMSI ${v.mmsi}`);
   els.trajectoryOptions.innerHTML = "";
+  const runners = [];
 
   if ((v.history || []).length > 1) {
     L.polyline(v.history, {
@@ -572,7 +608,7 @@ function showTrajectory(v) {
     }).addTo(globalProjectionLayer);
   }
 
-  for (const scenario of scenarios) {
+  scenarios.forEach((scenario, index) => {
     const end = projectedPoint(start[0], start[1], scenario.bearing, scenario.distance);
     L.polyline([start, end], {
       color: scenario.color,
@@ -580,6 +616,7 @@ function showTrajectory(v) {
       opacity: 0.9,
       dashArray: "6 5",
       interactive: false,
+      className: `trajectory-path trajectory-path-${index}`,
     }).addTo(globalProjectionLayer);
     L.circle(end, {
       radius: 450 + age * 8,
@@ -590,7 +627,18 @@ function showTrajectory(v) {
       fillOpacity: 0.08,
       dashArray: "3 4",
       interactive: false,
+      className: "trajectory-radius",
     }).addTo(globalProjectionLayer);
+    const runner = L.circleMarker(start, {
+      radius: 4,
+      color: scenario.color,
+      weight: 2,
+      fillColor: "#ffffff",
+      fillOpacity: 1,
+      interactive: false,
+      className: "trajectory-runner",
+    }).addTo(globalProjectionLayer);
+    runners.push({ marker: runner, start, end });
 
     const row = document.createElement("div");
     row.className = "trajectory-option";
@@ -599,7 +647,8 @@ function showTrajectory(v) {
       `<span>${escapeHtml(scenario.label)}</span>` +
       `<span class="trajectory-distance">${scenario.distance.toFixed(1)} nm</span>`;
     els.trajectoryOptions.appendChild(row);
-  }
+  });
+  startTrajectoryAnimation(runners);
   els.trajectoryPanel.classList.remove("hidden");
   if (map.getZoom() < 9) map.setView(start, 9, { animate: true });
 }
@@ -638,9 +687,32 @@ function applyGlobalFix(v) {
 }
 
 els.trajectoryClose.addEventListener("click", hideTrajectory);
+for (const button of document.querySelectorAll(".trajectory-mode")) {
+  button.addEventListener("click", () => {
+    state.trajectoryMode = button.dataset.trajectoryMode;
+    for (const other of document.querySelectorAll(".trajectory-mode")) {
+      other.classList.toggle("active", other === button);
+    }
+    if (state.selectedVessel) showTrajectory(state.selectedVessel);
+  });
+}
+
+function globalStatusText() {
+  if (state.globalLive) {
+    return `LIVE AISSTREAM · ${state.globalVessels.length} contacts`;
+  }
+  if (!state.globalStatus.configured) {
+    return "LIVE AIS DISABLED · ADD AISSTREAM_API_KEY TO .env";
+  }
+  if (state.globalStatus.connected) {
+    return "AISSTREAM CONNECTED · WAITING FOR POSITION REPORTS";
+  }
+  return "AISSTREAM CONNECTING / RETRYING";
+}
 
 function setGlobalLayer(on) {
   state.globalLayerOn = on;
+  document.body.classList.toggle("live-mode", on);
   els.btnGlobalLayer.classList.toggle("active", on);
   if (on) {
     state.localView = { center: map.getCenter(), zoom: map.getZoom() };
@@ -650,9 +722,7 @@ function setGlobalLayer(on) {
     els.statsTracks.textContent = state.globalVessels.length;
     els.statsDark.textContent = state.globalVessels.filter((v) => v.dark).length;
     els.globalBadge.classList.remove("hidden");
-    els.globalBadge.textContent = state.globalLive
-      ? "LIVE GLOBAL AIS · aisstream.io"
-      : "DEMO · SYNTHETIC GLOBAL TRAFFIC · NOT LIVE AIS";
+    els.globalBadge.textContent = globalStatusText();
   } else {
     hideTrajectory();
     map.removeLayer(globalLayer);
@@ -667,6 +737,11 @@ function setGlobalLayer(on) {
 els.btnGlobalLayer.addEventListener("click", () => setGlobalLayer(!state.globalLayerOn));
 
 map.on("zoomend", () => {
+  if (map.getZoom() >= 7) {
+    if (!map.hasLayer(contextReferenceLayer)) contextReferenceLayer.addTo(map);
+  } else if (map.hasLayer(contextReferenceLayer)) {
+    map.removeLayer(contextReferenceLayer);
+  }
   if (state.selectedMmsi) return;
   const shouldGlobal = map.getZoom() < GLOBAL_ZOOM_THRESHOLD;
   if (shouldGlobal !== state.globalLayerOn) setGlobalLayer(shouldGlobal);
@@ -677,6 +752,7 @@ async function pollGlobal() {
   try {
     const data = await getJson("/api/global");
     state.globalLive = !!data.live;
+    state.globalStatus = data.status || {};
     state.globalVessels = data.vessels || [];
     const seen = new Set();
     for (const v of state.globalVessels) {
@@ -698,7 +774,7 @@ async function pollGlobal() {
           `${Number(status.position_reports || 0).toLocaleString()} positions · ` +
           `${Number(status.static_reports || 0).toLocaleString()} static/voyage · ` +
           `${status.regions || 0} regions`
-        : `DEMO · SYNTHETIC GLOBAL TRAFFIC · ${status.connected ? "AIS CONNECTING" : "NOT LIVE AIS"}`;
+        : globalStatusText();
     }
   } catch (err) {
     // Global layer is best-effort; local pack streaming must never depend on it.
@@ -790,9 +866,11 @@ document.addEventListener("keydown", (ev) => {
   else if (ev.key === "m" || ev.key === "M") toggleAssoc();
   else if (ev.key === "x" || ev.key === "X") jtmsRetract("broadcast_b_mmsi");
   else if (ev.key === "r" || ev.key === "R") jtmsReinstate("broadcast_b_mmsi");
+  else if (ev.key === "Escape" && state.selectedMmsi !== null) hideTrajectory();
   else if (ev.key === "Escape") els.btnReset.click();
 });
 
+setGlobalLayer(true);
 connect();
 jtmsReset().then(loadBrief);
 loadContextLayers();

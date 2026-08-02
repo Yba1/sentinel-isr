@@ -28,7 +28,7 @@
     <div id="map-wrap">
       <div id="map"></div>
       <div id="global-badge" class="global-badge hidden">
-        DEMO &middot; SYNTHETIC GLOBAL TRAFFIC &middot; NOT LIVE AIS
+        LIVE AIS &middot; WAITING FOR CONNECTION
       </div>
       <section id="trajectory-panel" class="trajectory-panel hidden" aria-live="polite">
         <button id="trajectory-close" class="trajectory-close" aria-label="Close trajectory details">Close</button>
@@ -36,6 +36,10 @@
         <div id="trajectory-meta" class="trajectory-meta"></div>
         <div id="trajectory-context" class="trajectory-context"></div>
         <div id="trajectory-risk" class="trajectory-context"></div>
+        <div class="trajectory-mode-switch" role="group" aria-label="Trajectory alternatives">
+          <button class="trajectory-mode active" data-trajectory-mode="triple">3 paths</button>
+          <button class="trajectory-mode" data-trajectory-mode="single">1 path</button>
+        </div>
         <div class="trajectory-heading">Projected paths · 30 minute horizon</div>
         <div id="trajectory-options"></div>
         <p class="trajectory-note">
@@ -101,7 +105,7 @@
 
     <button id="btn-assoc" class="tbtn" title="Toggle naive-greedy vs global Hungarian [M]">GLOBAL</button>
     <button id="btn-retract" class="tbtn" title="Retract broadcast_b_mmsi [X]">&#9888; Retract MMSI</button>
-    <button id="btn-global-layer" class="tbtn" title="Toggle synthetic global traffic layer">&#127760; Global</button>
+    <button id="btn-global-layer" class="tbtn" title="Toggle live AISStream contacts">&#127760; Live AIS</button>
 
     <div id="conn-status" class="conn-status">connecting&hellip;</div>
   </div>

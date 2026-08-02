@@ -1,26 +1,18 @@
 """Zoomed-out global ship layer.
 
-Two tiers, and the dashboard is told honestly which one it is getting:
-
-  REAL  -- a live websocket feed from aisstream.io (global, free-tier AIS
-           receiver network), if AISSTREAM_API_KEY is set in the environment
-           (or a local, gitignored .env file) AND the connection actually
-           produces at least one real position report within CONNECT_TIMEOUT_S.
-  DEMO  -- a small set of procedurally-generated vessels moving along real
-           major shipping lanes (great-circle-ish waypoint routes), used the
-           moment the real feed is unset, unreachable, or still connecting.
+The layer contains real AISStream contacts only. If no API key is configured,
+or the upstream connection has not produced a position report, the API returns
+an empty contact list and an explicit status instead of synthetic substitutes.
 
 This module never blocks the rest of the server on the real feed: run() is a
 background task, snapshot() always returns immediately from whatever state
-currently exists (empty at first tick, demo a moment later if the real feed
-hasn't produced anything yet, real once it has).
+currently exists.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import math
 import time
 
 import aiohttp
@@ -48,57 +40,6 @@ REGIONAL_BOXES = [
     [[-10, 90], [20, 125]],      # Malacca / Indonesia
     [[-40, 10], [-20, 45]],      # Southern Africa
 ]
-
-# ---------------------------------------------------------------- demo lanes
-# A handful of real major shipping lanes (waypoint pairs, lon/lat), walked at
-# a plausible cargo-ship speed. This is NOT real traffic and is always
-# reported with live=False -- see server.py's /api/global.
-_LANES = [
-    ("SHANGHAI-LA", [(121.8, 31.2), (139.7, 35.4), (-157.9, 21.3), (-118.2, 33.7)]),
-    ("SUEZ", [(103.8, 1.3), (80.0, 6.0), (43.3, 12.6), (32.3, 29.9), (-5.4, 36.1)]),
-    ("ROTTERDAM-NY", [(4.5, 51.9), (-5.9, 49.7), (-40.0, 45.0), (-74.0, 40.7)]),
-    ("PANAMA", [(-79.5, 8.9), (-90.0, 15.0), (-118.2, 33.7)]),
-    ("STRAIT-OF-MALACCA", [(80.3, 6.0), (98.0, 5.5), (103.8, 1.3), (114.2, 22.3)]),
-]
-_DEMO_SPEED_DEG_PER_S = 0.0009  # ~ a cargo ship's degrees/second at cruise
-
-
-def _demo_snapshot(n_per_lane: int = 6) -> list[dict]:
-    """Deterministic-shape, time-driven synthetic global traffic. Positions
-    are a function of wall-clock time and lane index only -- no state to
-    carry between calls, so this needs no reset() and cannot leak across a
-    server restart."""
-    now = time.time()
-    out = []
-    mmsi = 900000000
-    for lane_idx, (name, waypoints) in enumerate(_LANES):
-        for k in range(n_per_lane):
-            phase = (now * _DEMO_SPEED_DEG_PER_S + k * 7.0 + lane_idx * 3.0)
-            seg_count = len(waypoints) - 1
-            total = phase % seg_count
-            seg = int(total)
-            frac = total - seg
-            (lon0, lat0), (lon1, lat1) = waypoints[seg], waypoints[(seg + 1) % len(waypoints)]
-            lon = lon0 + (lon1 - lon0) * frac
-            lat = lat0 + (lat1 - lat0) * frac
-            course = math.degrees(math.atan2(lon1 - lon0, lat1 - lat0)) % 360
-            age_s = 120.0 if k % 3 == 1 else 0.0
-            out.append({
-                "mmsi": mmsi + lane_idx * 1000 + k,
-                "name": f"{name}-{k}",
-                "lat": round(lat, 3),
-                "lon": round(lon, 3),
-                "course": round(course, 1),
-                "speed_kn": 18.0,
-                "ship_type": "Cargo",
-                "destination": name.split("-")[-1],
-                "last_seen": now - age_s,
-                "age_s": age_s,
-                "dark": age_s >= DARK_AFTER_S,
-                "history": [],
-            })
-    return out
-
 
 # ------------------------------------------------------------------- real feed
 
@@ -296,6 +237,7 @@ class GlobalAisFeed:
 
     def status(self) -> dict:
         return {
+            "configured": True,
             "connected": self.connected,
             "messages_received": self.messages_received,
             "position_reports": self.position_reports,
@@ -309,15 +251,14 @@ class GlobalAisFeed:
 
 
 def global_snapshot(feed: "GlobalAisFeed | None") -> dict:
-    """What /api/global returns: real feed if it has ever produced a fix,
-    otherwise the synthetic demo lane traffic, always labelled honestly."""
+    """Return real AIS contacts, or an explicit empty/offline state."""
     if feed is not None and feed.live and feed.vessels:
         return {"live": True, "vessels": feed.snapshot(), "status": feed.status()}
-    demo = [maritime_context().annotate(vessel) for vessel in _demo_snapshot()]
     return {
         "live": False,
-        "vessels": demo,
-        "status": feed.status() if feed is not None else {
+        "vessels": [],
+        "status": {**feed.status(), "configured": True} if feed is not None else {
+            "configured": False,
             "connected": False,
             "messages_received": 0,
             "position_reports": 0,

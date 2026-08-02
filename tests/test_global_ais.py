@@ -3,14 +3,12 @@ import json
 from data import global_ais
 
 
-def test_demo_contacts_include_live_and_coasting_states(monkeypatch):
-    monkeypatch.setattr(global_ais.time, "time", lambda: 1_700_000_000.0)
+def test_unconfigured_feed_returns_no_synthetic_contacts():
+    result = global_ais.global_snapshot(None)
 
-    contacts = global_ais._demo_snapshot(n_per_lane=3)
-
-    assert contacts
-    assert {contact["dark"] for contact in contacts} == {False, True}
-    assert all("last_seen" in contact and "age_s" in contact for contact in contacts)
+    assert result["live"] is False
+    assert result["vessels"] == []
+    assert result["status"]["configured"] is False
 
 
 def test_real_contact_becomes_dark_after_report_timeout(monkeypatch):

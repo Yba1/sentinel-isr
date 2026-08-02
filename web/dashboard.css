@@ -224,6 +224,28 @@ html, body {
   font-weight: 900;
   margin-top: 0.35rem;
 }
+.trajectory-mode-switch {
+  display: flex;
+  gap: 0.35rem;
+  margin: 0.55rem 0;
+}
+.trajectory-mode {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #17202b;
+  color: var(--text-dim);
+  padding: 0.25rem 0.55rem;
+  font: inherit;
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.trajectory-mode.active {
+  border-color: var(--cyan);
+  background: rgba(94, 200, 216, 0.14);
+  color: var(--cyan);
+}
 .trajectory-heading {
   color: var(--text);
   font-size: 0.7rem;
@@ -244,6 +266,22 @@ html, body {
 }
 .trajectory-swatch { width: 10px; height: 2px; }
 .trajectory-distance { color: var(--text); font-weight: 700; }
+.trajectory-path {
+  animation: trajectory-flow 1.1s linear infinite;
+}
+.trajectory-radius {
+  animation: trajectory-radius-pulse 1.8s ease-in-out infinite;
+}
+.trajectory-runner {
+  filter: drop-shadow(0 0 5px currentColor);
+}
+@keyframes trajectory-flow {
+  to { stroke-dashoffset: -22; }
+}
+@keyframes trajectory-radius-pulse {
+  0%, 100% { stroke-opacity: 0.35; fill-opacity: 0.04; }
+  50% { stroke-opacity: 1; fill-opacity: 0.16; }
+}
 
 #stats-overlay {
   position: absolute;
@@ -388,6 +426,20 @@ html, body {
   background: var(--panel);
   border-top: 1px solid var(--border);
   flex-wrap: wrap;
+}
+
+body.live-mode #btn-reset,
+body.live-mode #btn-play,
+body.live-mode .speed-group,
+body.live-mode #scrubber,
+body.live-mode #frame-readout,
+body.live-mode #pack-picker,
+body.live-mode #btn-assoc,
+body.live-mode #btn-retract {
+  display: none;
+}
+body.live-mode #eventlog {
+  display: none;
 }
 
 .tbtn {

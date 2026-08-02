@@ -54,8 +54,9 @@ AEGIS_LLM=mockllm
 PORT=8765
 ```
 
-Without an AISStream key, the global view is clearly labeled synthetic. Without
-an LLM provider key, Aegis uses deterministic offline brief text.
+Without an AISStream key, the live view remains empty and clearly reports that
+configuration is required; Aegis never substitutes synthetic global contacts.
+Without an LLM provider key, it uses deterministic offline brief text.
 
 With `AISSTREAM_API_KEY` set, Aegis subscribes to position plus static/voyage
 reports across ten high-traffic maritime regions. It retains bounded track
