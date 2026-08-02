@@ -12,10 +12,12 @@ currently exists.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import os
 import time
 from collections import OrderedDict
+from pathlib import Path
 
 import aiohttp
 
@@ -27,6 +29,7 @@ MAX_TRACKED = int(os.getenv("AEGIS_MAX_ACTIVE_VESSELS", "100000"))
 DARK_AFTER_S = 45.0  # no fresh position report: render as a coasting contact
 MAX_HISTORY = 20
 MAX_TOMBSTONES = 50000
+STATE_RETENTION_S = 24 * 60 * 60
 
 # Busy maritime regions across every inhabited continent. A single world box
 # can deliver thousands of messages per second and starve the API server; these
@@ -54,8 +57,9 @@ class GlobalAisFeed:
     open alone, so a server that connects but gets no traffic still reports
     itself honestly as not-yet-live."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, state_path: str | Path | None = None):
         self.api_key = api_key
+        self.state_path = Path(state_path) if state_path else None
         self.vessels: dict[int, dict] = {}
         self.static_data: dict[int, dict] = {}
         self.pinned_mmsi: int | None = None
@@ -73,6 +77,62 @@ class GlobalAisFeed:
         self.reconnects = 0
         self.last_message_at = 0.0
         self.last_error = ""
+        self._load_state()
+
+    def _load_state(self) -> None:
+        """Restore real last-report timestamps saved during a prior run."""
+        if self.state_path is None or not self.state_path.is_file():
+            return
+        now = time.time()
+        try:
+            with gzip.open(self.state_path, "rt", encoding="utf-8") as stream:
+                payload = json.load(stream)
+            for saved in payload.get("vessels", ()):
+                mmsi = int(saved["mmsi"])
+                last_seen = float(saved["last_seen"])
+                age_s = max(0.0, now - last_seen)
+                if age_s > STATE_RETENTION_S:
+                    continue
+                row = {
+                    key: value
+                    for key, value in saved.items()
+                    if not key.startswith("_")
+                }
+                self.revision += 1
+                row["_revision"] = self.revision
+                self.vessels[mmsi] = row
+                if age_s >= DARK_AFTER_S:
+                    self._dark_mmsi.add(mmsi)
+                else:
+                    self._active_order[mmsi] = None
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            # A bad cache must never prevent the real AIS connection starting.
+            self.vessels.clear()
+            self._active_order.clear()
+            self._dark_mmsi.clear()
+            self.revision = 0
+
+    def save_state(self) -> None:
+        """Atomically retain recent real contacts so silence age survives restarts."""
+        if self.state_path is None:
+            return
+        cutoff = time.time() - STATE_RETENTION_S
+        rows = [
+            {
+                key: value
+                for key, value in vessel.items()
+                if not key.startswith("_")
+            }
+            for vessel in self.vessels.values()
+            if float(vessel.get("last_seen", 0.0)) >= cutoff
+        ]
+        rows.sort(key=lambda row: float(row.get("last_seen", 0.0)), reverse=True)
+        rows = rows[:MAX_TRACKED]
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
+        with gzip.open(temporary, "wt", encoding="utf-8") as stream:
+            json.dump({"saved_at": time.time(), "vessels": rows}, stream)
+        temporary.replace(self.state_path)
 
     @staticmethod
     def _identity_changed(mmsi: int, previous: dict, values: dict) -> bool:
@@ -365,6 +425,7 @@ class GlobalAisFeed:
             "last_error": self.last_error,
             "regions": len(REGIONAL_BOXES),
             "max_tracked": MAX_TRACKED,
+            "dark_after_s": DARK_AFTER_S,
             "active_contacts": len(self._active_order),
             "dark_contacts": len(self._dark_mmsi),
             "total_contacts": len(self.vessels),
@@ -393,5 +454,6 @@ def global_snapshot(feed: "GlobalAisFeed | None", since: int = 0) -> dict:
             "last_error": "",
             "regions": len(REGIONAL_BOXES),
             "max_tracked": MAX_TRACKED,
+            "dark_after_s": DARK_AFTER_S,
         },
     }

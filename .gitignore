@@ -9,6 +9,7 @@ env/
 .vscode/
 .idea/
 .DS_Store
+.aegis/
 
 # Raw downloads are fetched, not committed (~400 MB MarineCadastre pull). data/*.py is
 # the replay layer and IS committed; extracted per-pack AIS windows

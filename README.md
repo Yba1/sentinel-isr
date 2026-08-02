@@ -10,8 +10,9 @@ when its transmitter goes dark.
 - Two-stage global association preserves track continuity without using vessel identity.
 - Dark contacts coast on a Kalman prediction with a visible uncertainty ellipse.
 - Protected-zone entry, identity changes, and reacquisition create evidence-backed alerts.
-- Each active safety event receives a transparent incident-response budget range.
-  These figures are planning estimates—not claimed losses or cargo valuations.
+- Safety events receive separate desk-review, on-water, and—only for critical
+  cases—air-support options calculated from FY26 USCG reimbursable rates.
+  Options are conditional, non-additive, and are not claimed or incurred costs.
 - Clicking an active contact shows its live AIS details. Dark contacts receive
   600-run Monte Carlo predictions with a data-driven number of probability
   branches, optional Copernicus current drift, and widening uncertainty.
@@ -24,8 +25,8 @@ when its transmitter goes dark.
 - `web/` — aiohttp API/WebSocket server and Leaflet dashboard
 - `scenarios/` — synthetic and real-traffic demonstration packs
 
-The browser receives render-ready frame deltas. Tracking, severity, financial
-ranges, and uncertainty calculations remain server-side.
+The browser receives render-ready frame deltas. Tracking, severity, sourced
+response options, and uncertainty calculations remain server-side.
 
 ## Run
 
@@ -55,6 +56,7 @@ COPERNICUS_MARINE_PASSWORD=
 AEGIS_PACK=s02_synthetic_demo
 AEGIS_FRAMES=-1
 AEGIS_LLM=mockllm
+AEGIS_AIS_STATE_PATH=.aegis/ais_state.json.gz
 PORT=8765
 ```
 
@@ -66,8 +68,10 @@ With `AISSTREAM_API_KEY` set, Aegis subscribes to position plus static/voyage
 reports across ten high-traffic maritime regions. It retains bounded track
 history, detects stale/dark contacts, and displays vessel name, MMSI, IMO,
 call sign, type, destination, heading, speed, turn rate, and navigation status
-when AISStream supplies those fields. A whole-world box is intentionally not
-used because its message rate can starve a single-process dashboard.
+when AISStream supplies those fields. Recent real contact timestamps are saved
+locally so the total AIS-silence duration survives server restarts. A
+whole-world box is intentionally not used because its message rate can starve a
+single-process dashboard.
 
 ## Test
 
@@ -96,9 +100,9 @@ Every bundled reference dataset participates at runtime:
 
 The reference layers remain active in backend analysis without cluttering the
 live map. Contact details combine reference matches, AIS history, and a
-transparent response-cost range; dark contacts additionally show probabilistic
-trajectory branches. GEBCO bathymetry is available as an operator-controlled
-visual overlay.
+set of conditional response options with visible rate assumptions; dark
+contacts additionally show probabilistic trajectory branches. GEBCO bathymetry
+is available as an operator-controlled visual overlay.
 
 Aegis includes an organizer-approved rewrite of prior maritime-tracking work
 from [Yba1/sentinel-isr](https://github.com/Yba1/sentinel-isr). The runtime has

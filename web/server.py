@@ -49,6 +49,7 @@ from data.dark_prediction import predict_dark_vessel
 from data.global_fishing_watch import GlobalFishingWatchClient
 from data.maritime_context import maritime_context
 from data.ocean_conditions import OceanConditionsClient
+from data.weather_conditions import WeatherConditionsClient
 from aegis.graph import build_mission
 from aegis.main import run_frame_scored
 from aegis.fusion import assoc_provenance as main_assoc_source
@@ -215,12 +216,21 @@ def build_app(cache: dict) -> web.Application:
     app.on_startup.append(start_player)
 
     api_key = os.environ.get("AISSTREAM_API_KEY", "")
-    app["global_feed"] = GlobalAisFeed(api_key) if api_key else None
+    ais_state_path = Path(os.environ.get(
+        "AEGIS_AIS_STATE_PATH",
+        REPO_ROOT / ".aegis" / "ais_state.json.gz",
+    ))
+    app["global_feed"] = (
+        GlobalAisFeed(api_key, state_path=ais_state_path)
+        if api_key else None
+    )
     gfw_token = os.environ.get("GFW_API_TOKEN", "")
     app["gfw_client"] = GlobalFishingWatchClient(gfw_token) if gfw_token else None
     app["ocean_client"] = OceanConditionsClient()
+    app["weather_client"] = WeatherConditionsClient()
     app["ocean_tasks"] = set()
     app["ocean_pending"] = set()
+    app["weather_pending"] = set()
 
     async def start_global_feed(app: web.Application) -> None:
         if app["global_feed"] is not None:
@@ -230,6 +240,13 @@ def build_app(cache: dict) -> web.Application:
         task = app.get("global_feed_task")
         if task is not None:
             task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        feed = app.get("global_feed")
+        if feed is not None:
+            feed.save_state()
 
     app.on_startup.append(start_global_feed)
     app.on_cleanup.append(stop_global_feed)
@@ -450,11 +467,39 @@ def build_app(cache: dict) -> web.Application:
                 app["ocean_tasks"].add(task)
                 task.add_done_callback(app["ocean_tasks"].discard)
 
+        weather_client = app["weather_client"]
+        weather = weather_client.cached_conditions(lat, lon)
+        if weather is None:
+            weather = {
+                "configured": True,
+                "available": False,
+                "pending": True,
+                "source": "NOAA Global Forecast System",
+            }
+            weather_region = (round(lat * 2), round(lon * 2))
+            if weather_region not in app["weather_pending"]:
+                app["weather_pending"].add(weather_region)
+
+                async def warm_weather() -> None:
+                    try:
+                        await asyncio.to_thread(
+                            weather_client.current_conditions,
+                            lat,
+                            lon,
+                        )
+                    finally:
+                        app["weather_pending"].discard(weather_region)
+
+                task = asyncio.create_task(warm_weather())
+                app["ocean_tasks"].add(task)
+                task.add_done_callback(app["ocean_tasks"].discard)
+
         prediction = await loop.run_in_executor(
             None,
             predict_dark_vessel,
             vessel,
             ocean,
+            weather,
         )
         return web.json_response(prediction)
 

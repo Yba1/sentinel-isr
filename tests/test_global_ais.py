@@ -9,6 +9,7 @@ def test_unconfigured_feed_returns_no_synthetic_contacts():
     assert result["live"] is False
     assert result["vessels"] == []
     assert result["status"]["configured"] is False
+    assert result["status"]["dark_after_s"] == 45.0
 
 
 def test_real_contact_becomes_dark_after_report_timeout(monkeypatch):
@@ -30,6 +31,36 @@ def test_real_contact_becomes_dark_after_report_timeout(monkeypatch):
     assert feed.snapshot()[0]["dark"] is False
     now[0] += global_ais.DARK_AFTER_S + 1
     assert feed.snapshot()[0]["dark"] is True
+    assert feed.status()["dark_after_s"] == global_ais.DARK_AFTER_S
+
+
+def test_persisted_last_report_preserves_total_silence_age(monkeypatch, tmp_path):
+    now = [1_700_000_000.0]
+    monkeypatch.setattr(global_ais.time, "time", lambda: now[0])
+    state_path = tmp_path / "ais-state.json.gz"
+    feed = global_ais.GlobalAisFeed("not-a-real-key", state_path=state_path)
+    feed._record(
+        123456789,
+        {
+            "name": "Persistent Vessel",
+            "lat": 37.8,
+            "lon": -122.4,
+            "course": 90.0,
+            "speed_kn": 12.0,
+        },
+    )
+    now[0] += 95 * 60
+    feed.save_state()
+
+    restored = global_ais.GlobalAisFeed(
+        "not-a-real-key",
+        state_path=state_path,
+    )
+    vessel = restored.snapshot()[0]
+
+    assert vessel["mmsi"] == 123456789
+    assert vessel["age_s"] == 95 * 60
+    assert vessel["dark"] is True
 
 
 def test_static_voyage_data_merges_without_refreshing_position_age(monkeypatch):

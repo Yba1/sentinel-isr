@@ -17,7 +17,7 @@ body.intro-active #app {
   z-index: 10000;
   overflow: hidden;
   color: #f7fbfc;
-  font-family: "Orbitron", "IBM Plex Sans", sans-serif;
+  font-family: var(--font);
   isolation: isolate;
 }
 
@@ -81,7 +81,7 @@ body.intro-active #app {
 .intro-kicker {
   margin: 0 0 .55rem;
   color: rgba(245, 252, 252, .76);
-  font-family: "Space Mono", "IBM Plex Mono", monospace;
+  font-family: var(--font);
   font-size: clamp(.66rem, .95vw, .84rem);
   font-weight: 400;
   letter-spacing: .38em;
@@ -108,7 +108,7 @@ body.intro-active #app {
   width: clamp(120px, 18vw, 260px);
   height: 1px;
   margin: 1.3rem auto 0;
-  background: linear-gradient(90deg, transparent, var(--intro-cyan), transparent);
+  background: rgba(217, 251, 255, .65);
   box-shadow: 0 0 10px rgba(195, 248, 255, .5);
 }
 
@@ -168,7 +168,7 @@ body.intro-active #app {
   border-bottom: 1px solid rgba(255, 255, 255, .42);
   background: transparent;
   color: rgba(255, 255, 255, .66);
-  font: 400 .62rem/1 "Space Mono", monospace;
+  font: 400 .62rem/1 var(--font);
   letter-spacing: .18em;
   text-transform: uppercase;
   cursor: pointer;

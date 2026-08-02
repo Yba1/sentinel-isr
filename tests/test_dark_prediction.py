@@ -78,13 +78,65 @@ def test_copernicus_current_changes_paths_and_is_reported():
     assert with_current["scenarios"] != baseline["scenarios"]
 
 
-def test_extreme_reported_turn_rate_decays_instead_of_spiraling():
+def test_behavior_hypotheses_include_turnaround_drift_and_curved_routes():
+    prediction = predict_dark_vessel(_dark_vessel(age_s=180.0))
+    scenarios = prediction["scenarios"]
+    behaviors = {scenario["behavior"] for scenario in scenarios}
+
+    assert "course_reversal" in behaviors
+    assert "drift" in behaviors
+    assert "maneuver" in behaviors
+    assert abs(sum(row["probability"] for row in scenarios) - 1.0) < 0.001
+
+    reversal = next(
+        scenario for scenario in scenarios
+        if scenario["behavior"] == "course_reversal"
+    )
+    path = reversal["path"]
+    segment_bearings = [
+        math.degrees(math.atan2(
+            (end[1] - start[1]) * math.cos(math.radians(start[0])),
+            end[0] - start[0],
+        )) % 360
+        for start, end in zip(path, path[1:])
+        if start != end
+    ]
+    total_turn = sum(
+        abs((end - start + 180) % 360 - 180)
+        for start, end in zip(segment_bearings, segment_bearings[1:])
+    )
+    assert total_turn > 80
+
+
+def test_noaa_wind_changes_paths_and_is_reported():
+    vessel = _dark_vessel(age_s=900.0)
+    baseline = predict_dark_vessel(vessel)
+    with_wind = predict_dark_vessel(vessel, weather_conditions={
+        "configured": True,
+        "available": True,
+        "source": "NOAA Global Forecast System",
+        "center": {
+            "east_mps": 8.0,
+            "north_mps": -2.0,
+            "speed_mps": 8.246,
+            "bearing_deg": 104.0,
+        },
+    })
+
+    assert with_wind["inputs"]["noaa_gfs_wind"] is True
+    assert with_wind["signal_availability"]["wind_forcing"] is True
+    assert with_wind["scenarios"] != baseline["scenarios"]
+
+
+def test_extreme_reported_turn_rate_settles_instead_of_spiraling():
     prediction = predict_dark_vessel(_dark_vessel(
         rate_of_turn=10.0,
         age_s=600.0,
     ))
 
     for scenario in prediction["scenarios"]:
+        if scenario["behavior"] == "drift":
+            continue
         path = scenario["path"]
         mean_lat = math.radians(sum(point[0] for point in path) / len(path))
 
@@ -94,6 +146,16 @@ def test_extreme_reported_turn_rate_decays_instead_of_spiraling():
                 (end[0] - start[0]) * 111_320,
             )
 
-        displacement = distance(path[0], path[-1])
-        travelled = sum(distance(path[index - 1], path[index]) for index in range(1, len(path)))
-        assert displacement / travelled > 0.7
+        segment_bearings = [
+            math.degrees(math.atan2(
+                (end[1] - start[1]) * math.cos(mean_lat),
+                end[0] - start[0],
+            )) % 360
+            for start, end in zip(path, path[1:])
+            if distance(start, end) > 1
+        ]
+        total_turn = sum(
+            abs((end - start + 180) % 360 - 180)
+            for start, end in zip(segment_bearings, segment_bearings[1:])
+        )
+        assert total_turn < 220

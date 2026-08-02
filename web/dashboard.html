@@ -6,7 +6,7 @@
 <title>Aegis · Maritime Safety & Financial Risk</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;600;700&family=Space+Mono&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="dashboard.css" />
 <link rel="stylesheet" href="onboarding.css" />
@@ -52,7 +52,7 @@
     <div id="map-wrap">
       <div id="map"></div>
       <div id="global-badge" class="global-badge hidden">
-        LIVE AIS &middot; WAITING FOR CONNECTION
+        Vessel feed &middot; connecting
       </div>
       <section id="trajectory-panel" class="trajectory-panel hidden" aria-live="polite">
         <button id="trajectory-close" class="trajectory-close" aria-label="Close trajectory details">Close</button>
@@ -61,21 +61,22 @@
         <div id="trajectory-context" class="trajectory-context"></div>
         <div id="trajectory-gfw" class="trajectory-context"></div>
         <div id="trajectory-risk" class="trajectory-context"></div>
+        <div id="trajectory-environment" class="trajectory-environment"></div>
         <div class="trajectory-mode-switch" role="group" aria-label="Trajectory alternatives">
-          <button class="trajectory-mode active" data-trajectory-mode="all">All branches</button>
-          <button class="trajectory-mode" data-trajectory-mode="single">Most likely</button>
+          <button class="trajectory-mode active" data-trajectory-mode="all">All likely routes</button>
+          <button class="trajectory-mode" data-trajectory-mode="single">Top route</button>
         </div>
-        <div id="trajectory-heading" class="trajectory-heading">Monte Carlo prediction</div>
+        <div id="trajectory-heading" class="trajectory-heading">Predicted route likelihood</div>
         <div id="trajectory-options"></div>
         <p id="trajectory-note" class="trajectory-note">
-          Calculated only after AIS silence. Unavailable sensor inputs are reported, never invented.
+          Route estimates appear only after a vessel stops reporting its position.
         </p>
       </section>
       <div id="stats-overlay">
-        <div class="stat"><span id="id-switch-count">0</span><label>id switches</label></div>
-        <div class="stat"><span id="stats-tracks">0</span><label>active</label></div>
-        <div class="stat"><span id="stats-dark">0</span><label>dark</label></div>
-        <div class="stat"><span id="stats-total">0</span><label>total</label></div>
+        <div class="stat"><span id="id-switch-count">0</span><label>identity changes</label></div>
+        <div class="stat"><span id="stats-tracks">0</span><label>transmitting</label></div>
+        <div class="stat"><span id="stats-dark">0</span><label id="stats-dark-label">no AIS report &gt;45s</label></div>
+        <div class="stat"><span id="stats-total">0</span><label>total vessels</label></div>
       </div>
     </div>
 
@@ -84,28 +85,28 @@
         <button class="tab-btn active" data-tab="risk">Risk</button>
         <button class="tab-btn" data-tab="brief">Brief</button>
         <button class="tab-btn" data-tab="jtms">Evidence</button>
-        <button class="tab-btn" data-tab="eval">Eval</button>
+        <button class="tab-btn" data-tab="eval">Checks</button>
       </div>
 
       <div id="tab-risk" class="tab-pane active">
-        <p class="hint">Transparent response-cost estimates based on active safety signals. These are planning ranges, not claimed losses.</p>
+        <p class="hint">Conditional response options calculated from official Coast Guard resource rates. Options are not incurred costs and are not added together.</p>
         <div id="risk-summary"></div>
         <div id="risk-list"></div>
       </div>
 
       <div id="tab-brief" class="tab-pane">
-        <p class="hint">Evidence-backed incident briefs. Without a model key, Aegis uses deterministic local text with no external model charge.</p>
+        <p class="hint">Plain-language summary of the selected vessel and active safety signals.</p>
         <div id="brief-list"></div>
       </div>
 
       <div id="tab-jtms" class="tab-pane">
-        <p class="hint">Live justification graph. Retract a fact and every dependent conclusion is recalculated to a fixpoint.</p>
+        <p class="hint">Observed signals supporting the current vessel assessment.</p>
         <div id="jtms-facts"></div>
         <div id="jtms-concls"></div>
       </div>
 
       <div id="tab-eval" class="tab-pane">
-        <p class="hint">tracker/eval.py regression harness, run on demand.</p>
+        <p class="hint">Checks calculated from the active live feed or the selected replay—not placeholder results.</p>
         <div id="eval-summary"></div>
         <div id="eval-list"></div>
       </div>
@@ -114,8 +115,8 @@
   </div>
 
   <div id="transport">
-    <button id="btn-reset" class="tbtn" title="Reset to frame 0 [Esc]">&#9198; Reset</button>
-    <button id="btn-play" class="tbtn tbtn-primary" title="Play / Pause [Space]">&#9654; Play</button>
+    <button id="btn-reset" class="tbtn" title="Return to the start of the scenario [Esc]">Reset</button>
+    <button id="btn-play" class="tbtn tbtn-primary" title="Play / Pause [Space]">Play</button>
 
     <div class="speed-group" role="group" aria-label="Playback speed">
       <button class="tbtn speed-btn" data-speed="1">1&times;</button>
@@ -124,14 +125,20 @@
     </div>
 
     <input id="scrubber" type="range" min="0" max="0" value="0" step="1" />
-    <div id="frame-readout">frame 0 / 0 &middot; 0:00:00</div>
+    <div id="frame-readout">Step 0 of 0 &middot; 00:00:00</div>
 
     <select id="pack-picker" title="Scenario pack"></select>
 
-    <button id="btn-assoc" class="tbtn" title="Toggle naive-greedy vs global Hungarian [M]">GLOBAL</button>
-    <button id="btn-retract" class="tbtn" title="Retract broadcast_b_mmsi [X]">&#9888; Retract MMSI</button>
-    <button id="btn-global-layer" class="tbtn" title="Toggle live AISStream contacts">&#127760; Live AIS</button>
-    <button id="btn-bathymetry" class="tbtn" title="Toggle GEBCO 2026 bathymetry">&#8776; Bathymetry</button>
+    <button id="btn-assoc" class="tbtn" title="Compare standard and simplified tracking [M]">STANDARD</button>
+    <button id="btn-retract" class="tbtn" title="Temporarily remove the secondary identity report [X]">Remove identity report</button>
+    <button id="btn-global-layer" class="tbtn control-with-glyph" title="Toggle live vessel positions">
+      <span class="control-glyph control-glyph-live" aria-hidden="true"></span>
+      <span>Live AIS</span>
+    </button>
+    <button id="btn-bathymetry" class="tbtn control-with-glyph active" title="Toggle colored GEBCO ocean map" aria-pressed="true">
+      <span class="control-glyph control-glyph-depth" aria-hidden="true"></span>
+      <span>Colored Map</span>
+    </button>
 
     <div id="conn-status" class="conn-status">connecting&hellip;</div>
   </div>

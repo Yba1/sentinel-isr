@@ -25,7 +25,9 @@ def test_live_fix_is_screened_against_ofac_subset():
 
     assert result["context"]["ofac"]["name"] == "ARTAVIL"
     assert result["context"]["ofac"]["match_basis"] == "mmsi"
-    assert result["risk"]["high_usd"] == 75_000
+    assert result["risk"]["high_usd"] == 589
+    assert result["risk"]["items"][0]["tier"] == "desk_review"
+    assert result["risk"]["source"]["rate_schedule"] == "FY26 Reimbursable Standard Rates"
 
 
 def test_live_fix_is_checked_for_port_and_cable_proximity():

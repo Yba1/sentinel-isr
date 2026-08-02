@@ -16,8 +16,14 @@
   [Copernicus Marine Service](https://marine.copernicus.eu/)
 - Optional bathymetry overlay: GEBCO Bathymetric Compilation Group 2026,
   [GEBCO_2026 Grid](https://www.gebco.net/data-products-gridded-bathymetry-data/gebco2026-grid)
+- Response-planning resource rates: U.S. Coast Guard National Pollution Funds
+  Center Electronic CG-5136 Cost Documentation Workbook, FY26 Reimbursable
+  Standard Rates effective October 1, 2025,
+  [Cost Documentation](https://www.uscg.mil/Mariners/National-Pollution-Funds-Center/Documentation-Cost/)
 
 Scenario and sanctions records are demonstration data, not live intelligence.
 GEBCO data are contextual and must not be used for navigation or safety at sea.
+CG-5136 figures are outside-government reimbursable rates, not incurred costs,
+damages, dispatch recommendations, or inside-government accounting rates.
 Consult each provider's current terms before redistributing or deploying the
 datasets outside this project.

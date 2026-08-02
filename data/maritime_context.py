@@ -12,6 +12,8 @@ from shapely.geometry import Point, shape
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
+from financial import response_plan
+
 ROOT = Path(__file__).resolve().parent.parent
 GEO_DIR = ROOT / "geo"
 
@@ -213,35 +215,35 @@ class MaritimeContext:
 
     @staticmethod
     def _risk(vessel: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        items: list[dict[str, Any]] = []
-
-        def add(label: str, low: int, high: int, severity: str) -> None:
-            items.append({
-                "label": label,
-                "low_usd": low,
-                "high_usd": high,
-                "severity": severity,
-            })
-
+        signals: list[str] = []
+        severity = "warning"
         if context["ofac"]:
-            add("Sanctions-screening escalation", 10_000, 75_000, "critical")
+            signals.append("Sanctions-list identity match")
+            severity = "critical"
         if vessel.get("dark") and context["in_sanctuary"]:
-            add("Dark contact in protected water", 15_000, 75_000, "critical")
+            signals.append("AIS-silent contact in protected water")
+            severity = "critical"
         elif vessel.get("dark"):
-            add("Dark-contact verification", 1_000, 5_000, "warning")
+            signals.append("AIS-silent contact")
         if context["in_port"]:
-            add("Port safety review", 2_500, 15_000, "warning")
+            signals.append("Contact near a monitored port")
         if context["near_cables"]:
-            add("Submarine-cable proximity review", 5_000, 30_000, "warning")
+            signals.append("Contact near submarine infrastructure")
         if context["on_land"]:
-            add("Invalid/grounding-position investigation", 2_500, 20_000, "warning")
+            signals.append("Reported position plots on land")
 
-        return {
-            "currency": "USD",
-            "low_usd": sum(item["low_usd"] for item in items),
-            "high_usd": sum(item["high_usd"] for item in items),
-            "items": items,
-        }
+        include_on_water = bool(vessel.get("dark") or context["on_land"])
+        include_air = bool(
+            vessel.get("dark")
+            and context["in_sanctuary"]
+        )
+        return response_plan(
+            signals,
+            severity=severity,
+            track_id=str(vessel.get("mmsi", "")),
+            include_on_water=include_on_water,
+            include_air=include_air,
+        )
 
 
 _CONTEXT: MaritimeContext | None = None
