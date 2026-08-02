@@ -25,10 +25,29 @@ import time
 
 import aiohttp
 
+from data.maritime_context import maritime_context
+
 AISSTREAM_WS_URL = "wss://stream.aisstream.io/v0/stream"
 CONNECT_TIMEOUT_S = 8.0
 MAX_TRACKED = 4000  # global feed can be enormous; cap memory, evict oldest-touched
 DARK_AFTER_S = 45.0  # no fresh position report: render as a coasting contact
+MAX_HISTORY = 20
+
+# Busy maritime regions across every inhabited continent. A single world box
+# can deliver thousands of messages per second and starve the API server; these
+# boxes retain global operational coverage while keeping one process responsive.
+REGIONAL_BOXES = [
+    [[35, -10], [65, 30]],       # North Sea / Western Europe
+    [[20, 100], [45, 145]],      # East Asia / Sea of Japan
+    [[-40, 110], [-10, 155]],    # Australia
+    [[25, -100], [50, -60]],     # US East Coast / Gulf / Great Lakes
+    [[30, -130], [55, -115]],    # US and Canada West Coast
+    [[-10, -55], [15, -30]],     # Brazil and tropical Atlantic
+    [[25, -10], [45, 40]],       # Mediterranean
+    [[5, 40], [30, 80]],         # Red Sea / Persian Gulf / India
+    [[-10, 90], [20, 125]],      # Malacca / Indonesia
+    [[-40, 10], [-20, 45]],      # Southern Africa
+]
 
 # ---------------------------------------------------------------- demo lanes
 # A handful of real major shipping lanes (waypoint pairs, lon/lat), walked at
@@ -71,9 +90,12 @@ def _demo_snapshot(n_per_lane: int = 6) -> list[dict]:
                 "lon": round(lon, 3),
                 "course": round(course, 1),
                 "speed_kn": 18.0,
+                "ship_type": "Cargo",
+                "destination": name.split("-")[-1],
                 "last_seen": now - age_s,
                 "age_s": age_s,
                 "dark": age_s >= DARK_AFTER_S,
+                "history": [],
             })
     return out
 
@@ -93,6 +115,13 @@ class GlobalAisFeed:
         self.vessels: dict[int, dict] = {}
         self.live = False
         self._touch_order: list[int] = []
+        self.connected = False
+        self.messages_received = 0
+        self.position_reports = 0
+        self.static_reports = 0
+        self.reconnects = 0
+        self.last_message_at = 0.0
+        self.last_error = ""
 
     def _record(self, mmsi: int, fix: dict) -> None:
         if mmsi not in self.vessels and len(self.vessels) >= MAX_TRACKED:
@@ -101,8 +130,35 @@ class GlobalAisFeed:
         if mmsi in self._touch_order:
             self._touch_order.remove(mmsi)
         self._touch_order.append(mmsi)
-        self.vessels[mmsi] = {**fix, "last_seen": time.time()}
+        previous = self.vessels.get(mmsi, {})
+        history = list(previous.get("history", []))
+        if "lat" in fix and "lon" in fix:
+            point = [float(fix["lat"]), float(fix["lon"])]
+            if not history or history[-1] != point:
+                history.append(point)
+                history = history[-MAX_HISTORY:]
+        self.vessels[mmsi] = {
+            **previous,
+            **fix,
+            "mmsi": mmsi,
+            "history": history,
+            "last_seen": time.time(),
+        }
         self.live = True
+
+    def _record_static(self, mmsi: int, values: dict) -> None:
+        if mmsi not in self.vessels and len(self.vessels) >= MAX_TRACKED:
+            return
+        previous = self.vessels.get(mmsi, {"mmsi": mmsi, "history": []})
+        self.vessels[mmsi] = {**previous, **values}
+
+    @staticmethod
+    def _first(mapping: dict, *names: str, default=None):
+        for name in names:
+            value = mapping.get(name)
+            if value not in (None, ""):
+                return value
+        return default
 
     def _handle_message(self, raw) -> None:
         # aisstream.io sends its JSON payloads as BINARY websocket frames
@@ -112,25 +168,78 @@ class GlobalAisFeed:
         if isinstance(raw, (bytes, bytearray)):
             raw = raw.decode("utf-8")
         data = json.loads(raw)
+        self.messages_received += 1
+        self.last_message_at = time.time()
         meta = data.get("MetaData") or {}
-        mmsi = meta.get("MMSI")
+        message_type = data.get("MessageType", "")
+        message = data.get("Message") or {}
+        mmsi = self._first(meta, "MMSI", "Mmsi")
+
+        if message_type in ("ShipStaticData", "StaticDataReport"):
+            static = message.get(message_type) or {}
+            mmsi = self._first(
+                meta,
+                "MMSI",
+                "Mmsi",
+                default=self._first(static, "UserID", "UserId"),
+            )
+            if mmsi is None:
+                return
+            self._record_static(int(mmsi), {
+                "name": str(
+                    self._first(
+                        static,
+                        "Name",
+                        "ShipName",
+                        default=meta.get("ShipName", ""),
+                    )
+                ).strip(),
+                "imo": self._first(static, "ImoNumber", "IMONumber", "Imo"),
+                "call_sign": str(
+                    self._first(static, "CallSign", "Callsign", default="")
+                ).strip(),
+                "ship_type": self._first(static, "Type", "ShipType", default=""),
+                "destination": str(static.get("Destination", "")).strip(),
+                "draught_m": self._first(
+                    static, "MaximumStaticDraught", "Draught", default=0.0
+                ),
+            })
+            self.static_reports += 1
+            return
+
         lat = meta.get("latitude")
         lon = meta.get("longitude")
         if mmsi is None or lat is None or lon is None:
-            report = (data.get("Message") or {}).get("PositionReport") or {}
+            report = (
+                message.get("PositionReport")
+                or message.get("StandardClassBPositionReport")
+                or {}
+            )
             lat = lat if lat is not None else report.get("Latitude")
             lon = lon if lon is not None else report.get("Longitude")
         if mmsi is None or lat is None or lon is None:
             return
-        report = (data.get("Message") or {}).get("PositionReport") or {}
+        report = (
+            message.get("PositionReport")
+            or message.get("StandardClassBPositionReport")
+            or {}
+        )
         self._record(int(mmsi), {
             "mmsi": int(mmsi),
-            "name": meta.get("ShipName", "").strip() or f"MMSI {mmsi}",
+            "name": (
+                meta.get("ShipName", "").strip()
+                or self.vessels.get(int(mmsi), {}).get("name")
+                or f"MMSI {mmsi}"
+            ),
             "lat": round(float(lat), 4),
             "lon": round(float(lon), 4),
             "course": report.get("Cog", 0.0),
             "speed_kn": report.get("Sog", 0.0),
+            "heading": report.get("TrueHeading", 0.0),
+            "navigation_status": report.get("NavigationalStatus", 0),
+            "rate_of_turn": report.get("RateOfTurn", 0.0),
         })
+        self.position_reports += 1
 
     async def run(self) -> None:
         backoff = 2.0
@@ -138,37 +247,37 @@ class GlobalAisFeed:
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(AISSTREAM_WS_URL) as ws:
-                        # NOT the whole planet: a global bbox floods this
-                        # process with the full worldwide AIS message rate
-                        # (thousands/sec), which is enough synchronous JSON
-                        # parsing to starve the asyncio loop and make the
-                        # HTTP server itself stop responding. A handful of
-                        # busy regional boxes gives genuinely live, real,
-                        # moving multi-continent traffic at a volume this
-                        # single process can parse without blocking.
+                        self.connected = True
+                        self.last_error = ""
                         await ws.send_str(json.dumps({
                             "APIKey": self.api_key,
-                            "BoundingBoxes": [
-                                [[35, -10], [65, 30]],      # North Sea / Western Europe
-                                [[20, 100], [45, 145]],     # East Asia / Sea of Japan
-                                [[-40, 110], [-10, 155]],   # Australia east coast
-                                [[25, -95], [45, -65]],     # US East Coast / Gulf
-                                [[-10, -50], [15, -30]],    # Brazil coast
+                            "BoundingBoxes": REGIONAL_BOXES,
+                            "FilterMessageTypes": [
+                                "PositionReport",
+                                "ShipStaticData",
                             ],
                         }))
                         backoff = 2.0
+                        since_yield = 0
                         async for msg in ws:
                             if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
                                 try:
                                     self._handle_message(msg.data)
                                 except (ValueError, TypeError, KeyError, UnicodeDecodeError):
                                     continue
+                                since_yield += 1
+                                if since_yield >= 100:
+                                    since_yield = 0
+                                    await asyncio.sleep(0)
                             elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED):
                                 break
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass
+            except Exception as exc:
+                self.last_error = type(exc).__name__
+            finally:
+                self.connected = False
+                self.reconnects += 1
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
 
@@ -176,17 +285,47 @@ class GlobalAisFeed:
         now = time.time()
         vessels = []
         for fix in self.vessels.values():
+            if "lat" not in fix or "lon" not in fix:
+                continue
             row = dict(fix)
             age_s = max(0.0, now - float(row.get("last_seen", now)))
             row["age_s"] = round(age_s, 1)
             row["dark"] = age_s >= DARK_AFTER_S
-            vessels.append(row)
+            vessels.append(maritime_context().annotate(row))
         return vessels
+
+    def status(self) -> dict:
+        return {
+            "connected": self.connected,
+            "messages_received": self.messages_received,
+            "position_reports": self.position_reports,
+            "static_reports": self.static_reports,
+            "reconnects": self.reconnects,
+            "last_message_at": self.last_message_at,
+            "last_error": self.last_error,
+            "regions": len(REGIONAL_BOXES),
+            "max_tracked": MAX_TRACKED,
+        }
 
 
 def global_snapshot(feed: "GlobalAisFeed | None") -> dict:
     """What /api/global returns: real feed if it has ever produced a fix,
     otherwise the synthetic demo lane traffic, always labelled honestly."""
     if feed is not None and feed.live and feed.vessels:
-        return {"live": True, "vessels": feed.snapshot()}
-    return {"live": False, "vessels": _demo_snapshot()}
+        return {"live": True, "vessels": feed.snapshot(), "status": feed.status()}
+    demo = [maritime_context().annotate(vessel) for vessel in _demo_snapshot()]
+    return {
+        "live": False,
+        "vessels": demo,
+        "status": feed.status() if feed is not None else {
+            "connected": False,
+            "messages_received": 0,
+            "position_reports": 0,
+            "static_reports": 0,
+            "reconnects": 0,
+            "last_message_at": 0.0,
+            "last_error": "",
+            "regions": len(REGIONAL_BOXES),
+            "max_tracked": MAX_TRACKED,
+        },
+    }

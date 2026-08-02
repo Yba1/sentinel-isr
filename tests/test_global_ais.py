@@ -1,3 +1,5 @@
+import json
+
 from data import global_ais
 
 
@@ -30,3 +32,40 @@ def test_real_contact_becomes_dark_after_report_timeout(monkeypatch):
     assert feed.snapshot()[0]["dark"] is False
     now[0] += global_ais.DARK_AFTER_S + 1
     assert feed.snapshot()[0]["dark"] is True
+
+
+def test_static_voyage_data_merges_without_refreshing_position_age(monkeypatch):
+    now = [1_700_000_000.0]
+    monkeypatch.setattr(global_ais.time, "time", lambda: now[0])
+    feed = global_ais.GlobalAisFeed("not-a-real-key")
+    feed._record(123456789, {"lat": 1.0, "lon": 2.0, "name": "Old"})
+    now[0] += 10
+
+    feed._handle_message(json.dumps({
+        "MessageType": "ShipStaticData",
+        "MetaData": {"MMSI": 123456789},
+        "Message": {
+            "ShipStaticData": {
+                "Name": "AEGIS TEST",
+                "ImoNumber": 7654321,
+                "CallSign": "WXYZ",
+                "Type": 70,
+                "Destination": "SFO",
+                "MaximumStaticDraught": 8.5,
+            }
+        },
+    }))
+
+    vessel = feed.snapshot()[0]
+    assert vessel["name"] == "AEGIS TEST"
+    assert vessel["imo"] == 7654321
+    assert vessel["destination"] == "SFO"
+    assert vessel["age_s"] == 10
+
+
+def test_position_reports_build_bounded_history():
+    feed = global_ais.GlobalAisFeed("not-a-real-key")
+    for index in range(global_ais.MAX_HISTORY + 5):
+        feed._record(123456789, {"lat": float(index), "lon": float(index)})
+
+    assert len(feed.vessels[123456789]["history"]) == global_ais.MAX_HISTORY

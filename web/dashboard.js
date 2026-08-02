@@ -42,6 +42,8 @@ const els = {
   trajectoryClose: document.getElementById("trajectory-close"),
   trajectoryName: document.getElementById("trajectory-name"),
   trajectoryMeta: document.getElementById("trajectory-meta"),
+  trajectoryContext: document.getElementById("trajectory-context"),
+  trajectoryRisk: document.getElementById("trajectory-risk"),
   trajectoryOptions: document.getElementById("trajectory-options"),
 };
 
@@ -61,6 +63,7 @@ const state = {
   globalVessels: [],
   selectedMmsi: null,
   localView: null,
+  lastFrameRisk: null,
 };
 
 const tracks = new Map(); // track_id -> { marker, trailGroup, ellipseLayer, positions, color }
@@ -89,6 +92,7 @@ const zonesLayer = L.featureGroup().addTo(map); // needs getBounds(); plain laye
 const localLayer = L.layerGroup().addTo(map);
 const globalLayer = L.layerGroup();
 const globalProjectionLayer = L.layerGroup().addTo(globalLayer);
+const contextReferenceLayer = L.layerGroup().addTo(map);
 
 function drawZones(zones) {
   zonesLayer.clearLayers();
@@ -109,6 +113,25 @@ function drawZones(zones) {
   if (zones && zones.length) {
     state.zonesDrawn = true;
     map.fitBounds(zonesLayer.getBounds().pad(6), { animate: false });
+  }
+}
+
+async function loadContextLayers() {
+  try {
+    const data = await getJson("/api/context/layers");
+    for (const layer of data.layers || []) {
+      L.geoJSON(layer.geojson, {
+        style: {
+          ...layer.style,
+          opacity: 0.75,
+          interactive: true,
+        },
+      })
+        .bindTooltip(`${escapeHtml(layer.name)} · ${escapeHtml(layer.kind)}`)
+        .addTo(contextReferenceLayer);
+    }
+  } catch (err) {
+    console.warn("Reference layers unavailable", err);
   }
 }
 
@@ -271,10 +294,16 @@ function formatUsd(value) {
 
 function updateFinancialRisk(msg) {
   const risk = msg.financial_risk || { low_usd: 0, high_usd: 0, items: [] };
+  state.lastFrameRisk = risk;
+  if (state.selectedMmsi !== null) return;
+  renderRiskPanel(risk, "Current frame");
+}
+
+function renderRiskPanel(risk, scope) {
   els.riskSummary.innerHTML =
     `<div class="risk-total"><span class="hint">Estimated response budget</span>` +
     `<span class="amount">${formatUsd(risk.low_usd)}–${formatUsd(risk.high_usd)}</span>` +
-    `<span class="hint">Current frame · planning range, not realized loss</span></div>`;
+    `<span class="hint">${escapeHtml(scope)} · planning range, not realized loss</span></div>`;
   els.riskList.innerHTML = "";
   for (const item of risk.items || []) {
     const div = document.createElement("div");
@@ -282,7 +311,7 @@ function updateFinancialRisk(msg) {
     div.innerHTML =
       `<div class="risk-range">${formatUsd(item.low_usd)}–${formatUsd(item.high_usd)}</div>` +
       `<div class="risk-label">${escapeHtml(item.label)}</div>` +
-      `<div class="risk-basis">${escapeHtml(item.basis)}</div>`;
+      `<div class="risk-basis">${escapeHtml(item.basis || "Deterministic Aegis response-cost rule.")}</div>`;
     els.riskList.appendChild(div);
   }
   if (!(risk.items || []).length) {
@@ -445,10 +474,13 @@ document.querySelector('[data-tab="jtms"]').addEventListener("click", () => { if
 
 // ----------------------------------------------------------- global layer
 
-function globalMarkerIcon(dark) {
+function globalMarkerIcon(v) {
+  const severity = (v.risk?.items || []).some((item) => item.severity === "critical")
+    ? " critical"
+    : (v.risk?.items || []).length ? " warning" : "";
   return L.divIcon({
     className: "global-dot",
-    html: `<div class="global-contact${dark ? " dark" : ""}"></div>`,
+    html: `<div class="global-contact${v.dark ? " dark" : ""}${severity}"></div>`,
     iconSize: [12, 12],
     iconAnchor: [6, 6],
   });
@@ -487,6 +519,7 @@ function hideTrajectory() {
   state.selectedMmsi = null;
   globalProjectionLayer.clearLayers();
   els.trajectoryPanel.classList.add("hidden");
+  if (state.lastFrameRisk) renderRiskPanel(state.lastFrameRisk, "Current frame");
 }
 
 function showTrajectory(v) {
@@ -496,13 +529,48 @@ function showTrajectory(v) {
   const scenarios = trajectoryScenarios(v);
   const age = Math.max(0, Number(v.age_s) || 0);
   const lastFix = new Date((Number(v.last_seen) || Date.now() / 1000) * 1000);
+  const context = v.context || {};
+  const risk = v.risk || { low_usd: 0, high_usd: 0, items: [] };
 
   els.trajectoryName.textContent = v.name || `MMSI ${v.mmsi}`;
   els.trajectoryMeta.innerHTML =
     `Last fix: ${escapeHtml(lastFix.toISOString().slice(11, 19))} UTC<br>` +
     `${v.dark ? `Dark for: ${Math.round(age)} s<br>` : ""}` +
-    `Track: ${Number(v.course || 0).toFixed(0)}° · ${Number(v.speed_kn || 0).toFixed(1)} kn`;
+    `MMSI: ${escapeHtml(v.mmsi)}${v.imo ? ` · IMO: ${escapeHtml(v.imo)}` : ""}<br>` +
+    `Track: ${Number(v.course || 0).toFixed(0)}° · ${Number(v.speed_kn || 0).toFixed(1)} kn` +
+    `${v.destination ? `<br>Destination: ${escapeHtml(v.destination)}` : ""}` +
+    `${v.call_sign ? ` · Call sign: ${escapeHtml(v.call_sign)}` : ""}`;
+
+  const contextLines = [];
+  if (context.ofac) {
+    contextLines.push(
+      `<strong class="context-critical">OFAC match:</strong> ${escapeHtml(context.ofac.name)} ` +
+      `(${escapeHtml(context.ofac.program)}, via ${escapeHtml(context.ofac.match_basis)})`
+    );
+  }
+  if (context.in_sanctuary) contextLines.push("Inside Monterey Bay sanctuary");
+  if (context.in_port) contextLines.push("Inside Port of San Francisco geofence");
+  if (context.on_land) contextLines.push("Position intersects coastline data");
+  for (const cable of context.near_cables || []) {
+    contextLines.push(`${escapeHtml(cable.name)} cable · ${Number(cable.distance_km).toFixed(1)} km`);
+  }
+  els.trajectoryContext.innerHTML = contextLines.length
+    ? `<div class="trajectory-heading">Reference-data matches</div>${contextLines.map((line) => `<div>${line}</div>`).join("")}`
+    : `<div class="context-clear">No bundled reference-data match at this position.</div>`;
+  els.trajectoryRisk.innerHTML =
+    `<div class="trajectory-heading">Financial response range</div>` +
+    `<div class="trajectory-cost">${formatUsd(risk.low_usd)}–${formatUsd(risk.high_usd)}</div>`;
+  renderRiskPanel(risk, v.name || `MMSI ${v.mmsi}`);
   els.trajectoryOptions.innerHTML = "";
+
+  if ((v.history || []).length > 1) {
+    L.polyline(v.history, {
+      color: "#ffb020",
+      weight: 2,
+      opacity: 0.65,
+      interactive: false,
+    }).addTo(globalProjectionLayer);
+  }
 
   for (const scenario of scenarios) {
     const end = projectedPoint(start[0], start[1], scenario.bearing, scenario.distance);
@@ -540,7 +608,7 @@ function applyGlobalFix(v) {
   let m = globalMarkers.get(v.mmsi);
   if (!m) {
     m = L.marker([v.lat, v.lon], {
-      icon: globalMarkerIcon(v.dark),
+      icon: globalMarkerIcon(v),
       interactive: true,
       keyboard: true,
       riseOnHover: true,
@@ -550,13 +618,21 @@ function applyGlobalFix(v) {
     globalMarkers.set(v.mmsi, m);
   } else {
     m.setLatLng([v.lat, v.lon]);
-    if (m._dark !== !!v.dark) m.setIcon(globalMarkerIcon(v.dark));
+    const riskHigh = Number(v.risk?.high_usd || 0);
+    if (m._dark !== !!v.dark || m._riskHigh !== riskHigh) m.setIcon(globalMarkerIcon(v));
   }
   m._fix = v;
   m._dark = !!v.dark;
+  m._riskHigh = Number(v.risk?.high_usd || 0);
+  const contextFlags = [
+    v.context?.ofac ? "OFAC MATCH" : "",
+    v.context?.in_sanctuary ? "SANCTUARY" : "",
+    (v.context?.near_cables || []).length ? "CABLE PROXIMITY" : "",
+  ].filter(Boolean);
   m.setTooltipContent(
     `${escapeHtml(v.name || `MMSI ${v.mmsi}`)} · ${Number(v.course || 0).toFixed(0)}° · ` +
-    `${Number(v.speed_kn || 0).toFixed(1)} kn${v.dark ? " · DARK / COASTING" : ""}`
+    `${Number(v.speed_kn || 0).toFixed(1)} kn${v.dark ? " · DARK / COASTING" : ""}` +
+    `${contextFlags.length ? ` · ${contextFlags.join(" · ")}` : ""}`
   );
   if (state.selectedMmsi === v.mmsi) showTrajectory(v);
 }
@@ -616,9 +692,13 @@ async function pollGlobal() {
     if (state.globalLayerOn) {
       els.statsTracks.textContent = state.globalVessels.length;
       els.statsDark.textContent = state.globalVessels.filter((v) => v.dark).length;
+      const status = data.status || {};
       els.globalBadge.textContent = state.globalLive
-        ? `LIVE GLOBAL AIS · aisstream.io · ${state.globalVessels.length} contacts`
-        : "DEMO · SYNTHETIC GLOBAL TRAFFIC · NOT LIVE AIS";
+        ? `LIVE AISSTREAM · ${state.globalVessels.length} contacts · ` +
+          `${Number(status.position_reports || 0).toLocaleString()} positions · ` +
+          `${Number(status.static_reports || 0).toLocaleString()} static/voyage · ` +
+          `${status.regions || 0} regions`
+        : `DEMO · SYNTHETIC GLOBAL TRAFFIC · ${status.connected ? "AIS CONNECTING" : "NOT LIVE AIS"}`;
     }
   } catch (err) {
     // Global layer is best-effort; local pack streaming must never depend on it.
@@ -715,3 +795,4 @@ document.addEventListener("keydown", (ev) => {
 
 connect();
 jtmsReset().then(loadBrief);
+loadContextLayers();

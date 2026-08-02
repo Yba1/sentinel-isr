@@ -57,6 +57,13 @@ PORT=8765
 Without an AISStream key, the global view is clearly labeled synthetic. Without
 an LLM provider key, Aegis uses deterministic offline brief text.
 
+With `AISSTREAM_API_KEY` set, Aegis subscribes to position plus static/voyage
+reports across ten high-traffic maritime regions. It retains bounded track
+history, detects stale/dark contacts, and displays vessel name, MMSI, IMO,
+call sign, type, destination, heading, speed, turn rate, and navigation status
+when AISStream supplies those fields. A whole-world box is intentionally not
+used because its message rate can starve a single-process dashboard.
+
 ## Test
 
 ```bash
@@ -70,6 +77,18 @@ complete replay pipeline.
 ## Data and attribution
 
 See `DATA_SOURCES.md` for map and scenario data sources.
+
+Every bundled reference dataset participates at runtime:
+
+- California coastline checks impossible/grounding positions.
+- Monterey Bay sanctuary and Port of San Francisco boundaries add geofence context.
+- Submarine-cable geometry adds proximity alerts.
+- The OFAC vessel subset screens live contacts by MMSI, IMO, call sign, and name.
+- All four scenario packs remain selectable from the dashboard.
+
+The same layers are drawn on the map, and each live-contact click combines
+reference matches, AIS history, trajectory scenarios, and a transparent
+response-cost range.
 
 Aegis includes an organizer-approved rewrite of prior maritime-tracking work
 from [Yba1/sentinel-isr](https://github.com/Yba1/sentinel-isr). The runtime has

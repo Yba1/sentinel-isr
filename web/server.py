@@ -45,6 +45,7 @@ from aiohttp import web, WSMsgType
 
 from data.scenario import load_scenario
 from data.global_ais import GlobalAisFeed, global_snapshot
+from data.maritime_context import maritime_context
 from aegis.graph import build_mission
 from aegis.main import run_frame_scored
 from aegis.fusion import assoc_provenance as main_assoc_source
@@ -383,7 +384,11 @@ def build_app(cache: dict) -> web.Application:
     async def api_global(request: web.Request) -> web.Response:
         return web.json_response(global_snapshot(app["global_feed"]))
 
+    async def api_context_layers(request: web.Request) -> web.Response:
+        return web.json_response({"layers": maritime_context().layer_payloads()})
+
     app.router.add_get("/api/global", api_global)
+    app.router.add_get("/api/context/layers", api_context_layers)
     app.router.add_get("/api/scenario", api_scenario)
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/play", api_play)

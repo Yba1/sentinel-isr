@@ -163,6 +163,13 @@ html, body {
   box-shadow: none;
   animation: contact-coast 3s linear infinite;
 }
+.global-contact.warning { border-color: var(--amber); }
+.global-contact.critical {
+  background: var(--critical);
+  border-color: var(--critical);
+  box-shadow: 0 0 9px rgba(239, 68, 68, 0.9);
+}
+.global-contact.dark.critical { background: transparent; }
 @keyframes contact-coast { to { transform: rotate(360deg); } }
 
 .trajectory-panel {
@@ -175,6 +182,8 @@ html, body {
   border: 1px solid rgba(255, 176, 32, 0.65);
   border-radius: 8px;
   padding: 0.8rem;
+  max-height: calc(100% - 1.5rem);
+  overflow-y: auto;
   box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
   font-family: "IBM Plex Mono", "SF Mono", monospace;
 }
@@ -199,6 +208,21 @@ html, body {
   font-size: 0.68rem;
   line-height: 1.45;
   margin: 0.35rem 0 0.65rem;
+}
+.trajectory-context {
+  color: var(--text-dim);
+  font-size: 0.68rem;
+  line-height: 1.5;
+  margin-bottom: 0.65rem;
+}
+.trajectory-context > div:not(.trajectory-heading) { margin-top: 0.2rem; }
+.context-critical { color: var(--critical); }
+.context-clear { color: var(--confirmed); }
+.trajectory-cost {
+  color: var(--amber);
+  font-size: 1rem;
+  font-weight: 900;
+  margin-top: 0.35rem;
 }
 .trajectory-heading {
   color: var(--text);
