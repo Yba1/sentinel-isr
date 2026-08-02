@@ -61,9 +61,20 @@ class GlobalAisFeed:
         self.messages_received = 0
         self.position_reports = 0
         self.static_reports = 0
+        self.identity_switches = 0
         self.reconnects = 0
         self.last_message_at = 0.0
         self.last_error = ""
+
+    @staticmethod
+    def _identity_changed(mmsi: int, previous: dict, values: dict) -> bool:
+        return any(
+            previous.get(field) not in (None, "", 0, f"MMSI {mmsi}")
+            and values.get(field) not in (None, "", 0)
+            and str(previous[field]).strip().upper()
+            != str(values[field]).strip().upper()
+            for field in ("name", "imo", "call_sign")
+        )
 
     def _record(self, mmsi: int, fix: dict) -> None:
         if mmsi not in self.vessels and len(self.vessels) >= MAX_TRACKED:
@@ -72,9 +83,12 @@ class GlobalAisFeed:
         if mmsi in self._touch_order:
             self._touch_order.remove(mmsi)
         self._touch_order.append(mmsi)
+        was_positioned = mmsi in self.vessels
         previous = self.vessels.get(mmsi)
         if previous is None:
             previous = self.static_data.pop(mmsi, {})
+        if was_positioned and self._identity_changed(mmsi, previous, fix):
+            self.identity_switches += 1
         history = list(previous.get("history", []))
         if "lat" in fix and "lon" in fix:
             point = [float(fix["lat"]), float(fix["lon"])]
@@ -92,6 +106,9 @@ class GlobalAisFeed:
 
     def _record_static(self, mmsi: int, values: dict) -> None:
         if mmsi in self.vessels:
+            previous = self.vessels[mmsi]
+            if self._identity_changed(mmsi, previous, values):
+                self.identity_switches += 1
             self.vessels[mmsi] = {**self.vessels[mmsi], **values}
             return
         if len(self.static_data) >= MAX_TRACKED * 2:
@@ -247,6 +264,7 @@ class GlobalAisFeed:
             "messages_received": self.messages_received,
             "position_reports": self.position_reports,
             "static_reports": self.static_reports,
+            "identity_switches": self.identity_switches,
             "reconnects": self.reconnects,
             "last_message_at": self.last_message_at,
             "last_error": self.last_error,

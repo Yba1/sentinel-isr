@@ -10,7 +10,6 @@
 
 const TRAIL_LEN = 20;
 const MAX_LOG_LINES = 400;
-const GLOBAL_ZOOM_THRESHOLD = 6; // below this zoom, show the global layer instead of local tracks
 
 const els = {
   map: document.getElementById("map"),
@@ -99,6 +98,11 @@ const localLayer = L.layerGroup().addTo(map);
 const globalLayer = L.layerGroup();
 const globalProjectionLayer = L.layerGroup().addTo(globalLayer);
 const contextReferenceLayer = L.layerGroup();
+const globalRenderer = L.canvas({ padding: 0.5, tolerance: 8 });
+map.createPane("contextPane");
+map.getPane("contextPane").style.zIndex = 350;
+map.getPane("contextPane").style.pointerEvents = "none";
+const contextRenderer = L.canvas({ padding: 0.5, pane: "contextPane" });
 
 function drawZones(zones) {
   zonesLayer.clearLayers();
@@ -127,7 +131,10 @@ async function loadContextLayers() {
     const data = await getJson("/api/context/layers");
     for (const layer of data.layers || []) {
       L.geoJSON(layer.geojson, {
+        pane: "contextPane",
+        renderer: contextRenderer,
         pointToLayer: (_feature, latlng) => L.circleMarker(latlng, {
+          renderer: contextRenderer,
           radius: 6,
           color: layer.style.color,
           weight: 2,
@@ -136,13 +143,14 @@ async function loadContextLayers() {
         }),
         style: {
           ...layer.style,
+          renderer: contextRenderer,
           opacity: 0.75,
-          interactive: true,
+          interactive: false,
         },
       })
-        .bindTooltip(`${escapeHtml(layer.name)} · ${escapeHtml(layer.kind)}`)
         .addTo(contextReferenceLayer);
     }
+    if (!map.hasLayer(contextReferenceLayer)) contextReferenceLayer.addTo(map);
   } catch (err) {
     console.warn("Reference layers unavailable", err);
   }
@@ -286,7 +294,7 @@ function updateStats(msg) {
   if (state.globalLayerOn) {
     els.statsTracks.textContent = state.globalVessels.length;
     els.statsDark.textContent = state.globalVessels.filter((v) => v.dark).length;
-    els.idCount.textContent = "—";
+    els.idCount.textContent = state.globalStatus.identity_switches ?? 0;
     return;
   }
   const s = msg.stats || {};
@@ -363,6 +371,11 @@ function setAssocUi(mode) {
   const naive = mode === "greedy";
   els.btnAssoc.textContent = naive ? "NAIVE (greedy)" : "GLOBAL (Hungarian)";
   els.btnAssoc.classList.toggle("naive", naive);
+  if (state.globalLayerOn) {
+    els.assocBadge.textContent = "AIS LIVE";
+    els.assocBadge.classList.remove("naive");
+    return;
+  }
   els.assocBadge.textContent = naive ? "NAIVE" : "GLOBAL";
   els.assocBadge.classList.toggle("naive", naive);
 }
@@ -493,16 +506,17 @@ document.querySelector('[data-tab="jtms"]').addEventListener("click", () => { if
 
 // ----------------------------------------------------------- global layer
 
-function globalMarkerIcon(v) {
-  const severity = (v.risk?.items || []).some((item) => item.severity === "critical")
-    ? " critical"
-    : (v.risk?.items || []).length ? " warning" : "";
-  return L.divIcon({
-    className: "global-dot",
-    html: `<div class="global-contact${v.dark ? " dark" : ""}${severity}"></div>`,
-    iconSize: [8, 8],
-    iconAnchor: [4, 4],
-  });
+function globalMarkerStyle(v) {
+  const critical = (v.risk?.items || []).some((item) => item.severity === "critical");
+  const color = critical ? "#ef4444" : "#ffb020";
+  return {
+    color,
+    weight: v.dark ? 1.5 : 0.75,
+    opacity: 0.95,
+    fillColor: color,
+    fillOpacity: v.dark ? 0 : 0.78,
+    dashArray: v.dark ? "3 3" : null,
+  };
 }
 
 function projectedPoint(lat, lon, bearingDeg, distanceNm) {
@@ -547,9 +561,8 @@ function startTrajectoryAnimation(runners) {
   const durationMs = 4800;
   const animate = (now) => {
     const phase = ((now - startedAt) % durationMs) / durationMs;
-    const eased = phase < 0.5
-      ? 2 * phase * phase
-      : 1 - Math.pow(-2 * phase + 2, 2) / 2;
+    const progress = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
+    const eased = progress * progress * (3 - 2 * progress);
     for (const runner of runners) {
       runner.marker.setLatLng([
         runner.start[0] + (runner.end[0] - runner.start[0]) * eased,
@@ -616,18 +629,11 @@ async function loadGfwIdentity(mmsi) {
   }
 }
 
-function showTrajectory(v) {
-  state.selectedMmsi = v.mmsi;
+function refreshSelectedVessel(v) {
   state.selectedVessel = v;
-  stopTrajectoryAnimation();
-  globalProjectionLayer.clearLayers();
-  const start = [Number(v.lat), Number(v.lon)];
-  const scenarios = trajectoryScenarios(v);
   const age = Math.max(0, Number(v.age_s) || 0);
   const lastFix = new Date((Number(v.last_seen) || Date.now() / 1000) * 1000);
-  const context = v.context || {};
   const risk = v.risk || { low_usd: 0, high_usd: 0, items: [] };
-
   els.trajectoryName.textContent = v.name || `MMSI ${v.mmsi}`;
   els.trajectoryMeta.innerHTML =
     `Last fix: ${escapeHtml(lastFix.toISOString().slice(11, 19))} UTC<br>` +
@@ -636,6 +642,21 @@ function showTrajectory(v) {
     `Track: ${Number(v.course || 0).toFixed(0)}° · ${Number(v.speed_kn || 0).toFixed(1)} kn` +
     `${v.destination ? `<br>Destination: ${escapeHtml(v.destination)}` : ""}` +
     `${v.call_sign ? ` · Call sign: ${escapeHtml(v.call_sign)}` : ""}`;
+  els.trajectoryRisk.innerHTML =
+    `<div class="trajectory-heading">Financial response range</div>` +
+    `<div class="trajectory-cost">${formatUsd(risk.low_usd)}–${formatUsd(risk.high_usd)}</div>`;
+  renderRiskPanel(risk, v.name || `MMSI ${v.mmsi}`);
+}
+
+function showTrajectory(v) {
+  state.selectedMmsi = v.mmsi;
+  stopTrajectoryAnimation();
+  globalProjectionLayer.clearLayers();
+  const start = [Number(v.lat), Number(v.lon)];
+  const scenarios = trajectoryScenarios(v);
+  const age = Math.max(0, Number(v.age_s) || 0);
+  const context = v.context || {};
+  refreshSelectedVessel(v);
 
   const contextLines = [];
   if (context.ofac) {
@@ -659,10 +680,6 @@ function showTrajectory(v) {
     ? `<div class="trajectory-heading">Reference-data matches</div>${contextLines.map((line) => `<div>${line}</div>`).join("")}`
     : `<div class="context-clear">No bundled reference-data match at this position.</div>`;
   loadGfwIdentity(v.mmsi);
-  els.trajectoryRisk.innerHTML =
-    `<div class="trajectory-heading">Financial response range</div>` +
-    `<div class="trajectory-cost">${formatUsd(risk.low_usd)}–${formatUsd(risk.high_usd)}</div>`;
-  renderRiskPanel(risk, v.name || `MMSI ${v.mmsi}`);
   els.trajectoryOptions.innerHTML = "";
   const runners = [];
 
@@ -717,25 +734,25 @@ function showTrajectory(v) {
   });
   startTrajectoryAnimation(runners);
   els.trajectoryPanel.classList.remove("hidden");
-  if (map.getZoom() < 9) map.setView(start, 9, { animate: true });
+  if (map.getZoom() < 9) map.flyTo(start, 9, { animate: true, duration: 0.8 });
 }
 
 function applyGlobalFix(v) {
   let m = globalMarkers.get(v.mmsi);
   if (!m) {
-    m = L.marker([v.lat, v.lon], {
-      icon: globalMarkerIcon(v),
+    m = L.circleMarker([v.lat, v.lon], {
+      renderer: globalRenderer,
+      radius: 3,
+      ...globalMarkerStyle(v),
       interactive: true,
-      keyboard: true,
-      riseOnHover: true,
+      bubblingMouseEvents: false,
     }).addTo(globalLayer);
     m.on("click", () => showTrajectory(m._fix));
     m.bindTooltip("", { sticky: true });
     globalMarkers.set(v.mmsi, m);
   } else {
     m.setLatLng([v.lat, v.lon]);
-    const riskHigh = Number(v.risk?.high_usd || 0);
-    if (m._dark !== !!v.dark || m._riskHigh !== riskHigh) m.setIcon(globalMarkerIcon(v));
+    m.setStyle(globalMarkerStyle(v));
   }
   m._fix = v;
   m._dark = !!v.dark;
@@ -750,7 +767,7 @@ function applyGlobalFix(v) {
     `${Number(v.speed_kn || 0).toFixed(1)} kn${v.dark ? " · DARK / COASTING" : ""}` +
     `${contextFlags.length ? ` · ${contextFlags.join(" · ")}` : ""}`
   );
-  if (state.selectedMmsi === v.mmsi) showTrajectory(v);
+  if (state.selectedMmsi === v.mmsi) refreshSelectedVessel(v);
 }
 
 els.trajectoryClose.addEventListener("click", hideTrajectory);
@@ -777,6 +794,25 @@ function globalStatusText() {
   return "AISSTREAM CONNECTING / RETRYING";
 }
 
+function renderLiveRail(status) {
+  if (!document.getElementById("live-rail-contacts")) {
+    els.log.innerHTML =
+      `<div class="log-line log-track"><span class="tag">[AIS]</span><span id="live-rail-contacts"></span></div>` +
+      `<div class="log-line log-fusion"><span class="tag">[STREAM]</span><span id="live-rail-messages"></span></div>` +
+      `<div class="log-line log-event"><span class="tag">[IDENTITY]</span><span id="live-rail-identities"></span></div>` +
+      `<div class="log-line log-zone"><span class="tag">[CONTEXT]</span>NOAA · NGA · Natural Earth · cables · OFAC</div>` +
+      `<div class="log-line log-log"><span class="tag">[ENRICH]</span>Global Fishing Watch on contact selection</div>`;
+  }
+  document.getElementById("live-rail-contacts").textContent =
+    `${state.globalVessels.length.toLocaleString()} positioned contacts · ` +
+    `${state.globalVessels.filter((v) => v.dark).length.toLocaleString()} dark`;
+  document.getElementById("live-rail-messages").textContent =
+    `${Number(status.position_reports || 0).toLocaleString()} positions · ` +
+    `${Number(status.static_reports || 0).toLocaleString()} static/voyage`;
+  document.getElementById("live-rail-identities").textContent =
+    `${Number(status.identity_switches || 0).toLocaleString()} observed changes`;
+}
+
 function setGlobalLayer(on) {
   state.globalLayerOn = on;
   document.body.classList.toggle("live-mode", on);
@@ -785,15 +821,19 @@ function setGlobalLayer(on) {
     state.localView = { center: map.getCenter(), zoom: map.getZoom() };
     map.removeLayer(localLayer);
     globalLayer.addTo(map);
-    map.setView([20, 0], 3, { animate: false });
     els.statsTracks.textContent = state.globalVessels.length;
     els.statsDark.textContent = state.globalVessels.filter((v) => v.dark).length;
+    els.idCount.textContent = state.globalStatus.identity_switches ?? 0;
+    els.assocBadge.textContent = "AIS LIVE";
+    els.assocBadge.classList.remove("naive");
+    renderLiveRail(state.globalStatus);
     els.globalBadge.classList.remove("hidden");
     els.globalBadge.textContent = globalStatusText();
   } else {
     hideTrajectory();
     map.removeLayer(globalLayer);
     localLayer.addTo(map);
+    setAssocUi(state.assocMode);
     if (state.localView) {
       map.setView(state.localView.center, state.localView.zoom, { animate: false });
       state.localView = null;
@@ -802,17 +842,6 @@ function setGlobalLayer(on) {
   }
 }
 els.btnGlobalLayer.addEventListener("click", () => setGlobalLayer(!state.globalLayerOn));
-
-map.on("zoomend", () => {
-  if (map.getZoom() >= 7) {
-    if (!map.hasLayer(contextReferenceLayer)) contextReferenceLayer.addTo(map);
-  } else if (map.hasLayer(contextReferenceLayer)) {
-    map.removeLayer(contextReferenceLayer);
-  }
-  if (state.selectedMmsi) return;
-  const shouldGlobal = map.getZoom() < GLOBAL_ZOOM_THRESHOLD;
-  if (shouldGlobal !== state.globalLayerOn) setGlobalLayer(shouldGlobal);
-});
 
 let globalPollTimer = null;
 async function pollGlobal() {
@@ -836,10 +865,13 @@ async function pollGlobal() {
       els.statsTracks.textContent = state.globalVessels.length;
       els.statsDark.textContent = state.globalVessels.filter((v) => v.dark).length;
       const status = data.status || {};
+      els.idCount.textContent = status.identity_switches ?? 0;
+      renderLiveRail(status);
       els.globalBadge.textContent = state.globalLive
         ? `LIVE AISSTREAM · ${state.globalVessels.length} contacts · ` +
           `${Number(status.position_reports || 0).toLocaleString()} positions · ` +
           `${Number(status.static_reports || 0).toLocaleString()} static/voyage · ` +
+          `${Number(status.identity_switches || 0).toLocaleString()} identity changes · ` +
           `${status.regions || 0} regions`
         : globalStatusText();
     }
@@ -891,11 +923,15 @@ function applyMessage(msg) {
 
     if (msg.type === "sync") {
       drawZones(msg.zones && msg.zones.length ? msg.zones : null);
-      const entries = [fusionEntry(msg)].concat((msg.history_alerts || []).map(alertEntry)).concat((msg.history_log || []).map(parseLogLine));
-      renderLogEntries(entries, { replace: true });
+      if (!state.globalLayerOn) {
+        const entries = [fusionEntry(msg)].concat((msg.history_alerts || []).map(alertEntry)).concat((msg.history_log || []).map(parseLogLine));
+        renderLogEntries(entries, { replace: true });
+      }
     } else {
-      const entries = [fusionEntry(msg)].concat((msg.alerts || []).map(alertEntry)).concat((msg.log || []).map(parseLogLine));
-      renderLogEntries(entries, { replace: false });
+      if (!state.globalLayerOn) {
+        const entries = [fusionEntry(msg)].concat((msg.alerts || []).map(alertEntry)).concat((msg.log || []).map(parseLogLine));
+        renderLogEntries(entries, { replace: false });
+      }
       const crit = (msg.alerts || []).find((a) => a.severity === "critical");
       if (crit) {
         els.banner.textContent = `⚠ ${crit.headline}`;

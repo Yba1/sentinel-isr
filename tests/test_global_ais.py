@@ -75,6 +75,42 @@ def test_static_only_reports_do_not_consume_position_contact_capacity():
     assert feed.static_data == {}
 
 
+def test_live_identity_switch_count_uses_observed_static_changes():
+    feed = global_ais.GlobalAisFeed("not-a-real-key")
+    feed._record(
+        123456789,
+        {
+            "lat": 1.0,
+            "lon": 2.0,
+            "name": "VESSEL ONE",
+            "imo": 7654321,
+            "call_sign": "CALL1",
+        },
+    )
+
+    feed._record_static(
+        123456789,
+        {"name": "VESSEL TWO", "imo": 7654321, "call_sign": "CALL1"},
+    )
+    feed._record_static(
+        123456789,
+        {"name": "VESSEL TWO", "imo": 7654321, "call_sign": "CALL1"},
+    )
+    feed._record(
+        123456789,
+        {
+            "lat": 1.1,
+            "lon": 2.1,
+            "name": "VESSEL THREE",
+            "imo": 7654321,
+            "call_sign": "CALL1",
+        },
+    )
+
+    assert feed.identity_switches == 2
+    assert feed.status()["identity_switches"] == 2
+
+
 def test_position_reports_build_bounded_history():
     feed = global_ais.GlobalAisFeed("not-a-real-key")
     for index in range(global_ais.MAX_HISTORY + 5):

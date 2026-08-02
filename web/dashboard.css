@@ -438,10 +438,6 @@ body.live-mode #btn-assoc,
 body.live-mode #btn-retract {
   display: none;
 }
-body.live-mode #eventlog {
-  display: none;
-}
-
 .tbtn {
   font-size: 0.85rem;
   font-weight: 700;
