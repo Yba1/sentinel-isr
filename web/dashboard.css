@@ -306,7 +306,8 @@ html, body {
   color: var(--critical);
 }
 #stats-overlay .stat:nth-child(2) span,
-#stats-overlay .stat:nth-child(3) span { color: var(--text); }
+#stats-overlay .stat:nth-child(3) span,
+#stats-overlay .stat:nth-child(4) span { color: var(--text); }
 #stats-overlay .stat label { font-size: 0.62rem; color: var(--text-dim); letter-spacing: 0.05em; text-transform: uppercase; }
 #id-switch-count.flash { animation: id-flash 700ms ease-out; }
 @keyframes id-flash {

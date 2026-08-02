@@ -17,6 +17,7 @@ const els = {
   idCount: document.getElementById("id-switch-count"),
   statsTracks: document.getElementById("stats-tracks"),
   statsDark: document.getElementById("stats-dark"),
+  statsTotal: document.getElementById("stats-total"),
   btnPlay: document.getElementById("btn-play"),
   btnReset: document.getElementById("btn-reset"),
   scrubber: document.getElementById("scrubber"),
@@ -292,14 +293,19 @@ function renderLogEntries(entries, { replace }) {
 
 function updateStats(msg) {
   if (state.globalLayerOn) {
-    els.statsTracks.textContent = state.globalVessels.length;
-    els.statsDark.textContent = state.globalVessels.filter((v) => v.dark).length;
+    const dark = state.globalVessels.filter((v) => v.dark).length;
+    els.statsTracks.textContent = state.globalVessels.length - dark;
+    els.statsDark.textContent = dark;
+    els.statsTotal.textContent = state.globalVessels.length;
     els.idCount.textContent = state.globalStatus.identity_switches ?? 0;
     return;
   }
   const s = msg.stats || {};
-  els.statsTracks.textContent = s.n_tracks ?? 0;
-  els.statsDark.textContent = s.n_dark ?? 0;
+  const total = Number(s.n_tracks ?? 0);
+  const dark = Number(s.n_dark ?? 0);
+  els.statsTracks.textContent = Math.max(0, total - dark);
+  els.statsDark.textContent = dark;
+  els.statsTotal.textContent = total;
   if (typeof msg.id_switches === "number") {
     els.idCount.textContent = msg.id_switches;
     if (msg.id_switches > state.lastIdSwitches) {
@@ -804,8 +810,9 @@ function renderLiveRail(status) {
       `<div class="log-line log-log"><span class="tag">[ENRICH]</span>Global Fishing Watch on contact selection</div>`;
   }
   document.getElementById("live-rail-contacts").textContent =
-    `${state.globalVessels.length.toLocaleString()} positioned contacts · ` +
-    `${state.globalVessels.filter((v) => v.dark).length.toLocaleString()} dark`;
+    `${(state.globalVessels.length - state.globalVessels.filter((v) => v.dark).length).toLocaleString()} active · ` +
+    `${state.globalVessels.filter((v) => v.dark).length.toLocaleString()} dark · ` +
+    `${state.globalVessels.length.toLocaleString()} total`;
   document.getElementById("live-rail-messages").textContent =
     `${Number(status.position_reports || 0).toLocaleString()} positions · ` +
     `${Number(status.static_reports || 0).toLocaleString()} static/voyage`;
@@ -821,8 +828,10 @@ function setGlobalLayer(on) {
     state.localView = { center: map.getCenter(), zoom: map.getZoom() };
     map.removeLayer(localLayer);
     globalLayer.addTo(map);
-    els.statsTracks.textContent = state.globalVessels.length;
-    els.statsDark.textContent = state.globalVessels.filter((v) => v.dark).length;
+    const dark = state.globalVessels.filter((v) => v.dark).length;
+    els.statsTracks.textContent = state.globalVessels.length - dark;
+    els.statsDark.textContent = dark;
+    els.statsTotal.textContent = state.globalVessels.length;
     els.idCount.textContent = state.globalStatus.identity_switches ?? 0;
     els.assocBadge.textContent = "AIS LIVE";
     els.assocBadge.classList.remove("naive");
@@ -862,8 +871,10 @@ async function pollGlobal() {
       if (state.selectedMmsi === mmsi) hideTrajectory();
     }
     if (state.globalLayerOn) {
-      els.statsTracks.textContent = state.globalVessels.length;
-      els.statsDark.textContent = state.globalVessels.filter((v) => v.dark).length;
+      const dark = state.globalVessels.filter((v) => v.dark).length;
+      els.statsTracks.textContent = state.globalVessels.length - dark;
+      els.statsDark.textContent = dark;
+      els.statsTotal.textContent = state.globalVessels.length;
       const status = data.status || {};
       els.idCount.textContent = status.identity_switches ?? 0;
       renderLiveRail(status);
