@@ -54,6 +54,7 @@ class GlobalAisFeed:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.vessels: dict[int, dict] = {}
+        self.static_data: dict[int, dict] = {}
         self.live = False
         self._touch_order: list[int] = []
         self.connected = False
@@ -71,7 +72,9 @@ class GlobalAisFeed:
         if mmsi in self._touch_order:
             self._touch_order.remove(mmsi)
         self._touch_order.append(mmsi)
-        previous = self.vessels.get(mmsi, {})
+        previous = self.vessels.get(mmsi)
+        if previous is None:
+            previous = self.static_data.pop(mmsi, {})
         history = list(previous.get("history", []))
         if "lat" in fix and "lon" in fix:
             point = [float(fix["lat"]), float(fix["lon"])]
@@ -88,10 +91,12 @@ class GlobalAisFeed:
         self.live = True
 
     def _record_static(self, mmsi: int, values: dict) -> None:
-        if mmsi not in self.vessels and len(self.vessels) >= MAX_TRACKED:
+        if mmsi in self.vessels:
+            self.vessels[mmsi] = {**self.vessels[mmsi], **values}
             return
-        previous = self.vessels.get(mmsi, {"mmsi": mmsi, "history": []})
-        self.vessels[mmsi] = {**previous, **values}
+        if len(self.static_data) >= MAX_TRACKED * 2:
+            self.static_data.pop(next(iter(self.static_data)))
+        self.static_data[mmsi] = {**self.static_data.get(mmsi, {}), **values}
 
     @staticmethod
     def _first(mapping: dict, *names: str, default=None):

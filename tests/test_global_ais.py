@@ -61,6 +61,20 @@ def test_static_voyage_data_merges_without_refreshing_position_age(monkeypatch):
     assert vessel["age_s"] == 10
 
 
+def test_static_only_reports_do_not_consume_position_contact_capacity():
+    feed = global_ais.GlobalAisFeed("not-a-real-key")
+    feed._record_static(123456789, {"name": "STATIC FIRST", "imo": 7654321})
+
+    assert feed.vessels == {}
+    assert feed.static_data[123456789]["name"] == "STATIC FIRST"
+
+    feed._record(123456789, {"lat": 1.0, "lon": 2.0})
+
+    assert feed.vessels[123456789]["name"] == "STATIC FIRST"
+    assert feed.vessels[123456789]["imo"] == 7654321
+    assert feed.static_data == {}
+
+
 def test_position_reports_build_bounded_history():
     feed = global_ais.GlobalAisFeed("not-a-real-key")
     for index in range(global_ais.MAX_HISTORY + 5):

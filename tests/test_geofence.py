@@ -949,21 +949,17 @@ def test_load_real_submarine_cables():
 
 
 @_requires("port_of_sf_geofence.geojson")
-def test_load_real_port_of_sf():
-    fences = load_geojson_fences(_geo("port_of_sf_geofence.geojson"), ORIGIN,
-                                 kind="port")
-    assert len(fences) == 1
-    f = fences[0]
-    assert f.kind == "port"
-    assert f.geom.geom_type == "Polygon"
-    assert f.geom.area > 0.0
-    # Label came from the feature's own name property, not the filename stem.
-    assert "San Francisco" in f.label
+def test_load_official_port_of_sf_reference():
+    with open(_geo("port_of_sf_geofence.geojson"), encoding="utf-8") as handle:
+        feature = json.load(handle)["features"][0]
 
-    # SF is ~150 km north of the Monterey origin, and nowhere near open ocean.
-    assert GeofenceIndex(fences).query(
-        lonlat_to_enu([OPEN_OCEAN_LONLAT], ORIGIN)[0]
-    ) == []
+    assert feature["geometry"]["type"] == "Point"
+    assert feature["properties"]["PORT_NAME"] == "SAN FRANCISCO"
+    assert feature["properties"]["INDEX_NO"] == 16300
+    assert feature["properties"]["source"] == "NGA World Port Index FeatureServer"
+    lon, lat = feature["geometry"]["coordinates"]
+    assert abs(lon - -122.416666666833) < 1e-10
+    assert abs(lat - 37.8166666670331) < 1e-10
 
 
 @_requires("monterey_bay_nms_boundary.geojson")

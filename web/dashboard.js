@@ -43,6 +43,7 @@ const els = {
   trajectoryName: document.getElementById("trajectory-name"),
   trajectoryMeta: document.getElementById("trajectory-meta"),
   trajectoryContext: document.getElementById("trajectory-context"),
+  trajectoryGfw: document.getElementById("trajectory-gfw"),
   trajectoryRisk: document.getElementById("trajectory-risk"),
   trajectoryOptions: document.getElementById("trajectory-options"),
 };
@@ -66,6 +67,7 @@ const state = {
   selectedVessel: null,
   trajectoryMode: "triple",
   trajectoryAnimationFrame: null,
+  gfwCache: new Map(),
   localView: null,
   lastFrameRisk: null,
 };
@@ -125,6 +127,13 @@ async function loadContextLayers() {
     const data = await getJson("/api/context/layers");
     for (const layer of data.layers || []) {
       L.geoJSON(layer.geojson, {
+        pointToLayer: (_feature, latlng) => L.circleMarker(latlng, {
+          radius: 6,
+          color: layer.style.color,
+          weight: 2,
+          fillColor: layer.style.color,
+          fillOpacity: 0.35,
+        }),
         style: {
           ...layer.style,
           opacity: 0.75,
@@ -274,6 +283,12 @@ function renderLogEntries(entries, { replace }) {
 // ----------------------------------------------------------------- stats
 
 function updateStats(msg) {
+  if (state.globalLayerOn) {
+    els.statsTracks.textContent = state.globalVessels.length;
+    els.statsDark.textContent = state.globalVessels.filter((v) => v.dark).length;
+    els.idCount.textContent = "—";
+    return;
+  }
   const s = msg.stats || {};
   els.statsTracks.textContent = s.n_tracks ?? 0;
   els.statsDark.textContent = s.n_dark ?? 0;
@@ -485,8 +500,8 @@ function globalMarkerIcon(v) {
   return L.divIcon({
     className: "global-dot",
     html: `<div class="global-contact${v.dark ? " dark" : ""}${severity}"></div>`,
-    iconSize: [12, 12],
-    iconAnchor: [6, 6],
+    iconSize: [8, 8],
+    iconAnchor: [4, 4],
   });
 }
 
@@ -555,6 +570,52 @@ function hideTrajectory() {
   if (state.lastFrameRisk) renderRiskPanel(state.lastFrameRisk, "Current frame");
 }
 
+function renderGfwIdentity(data) {
+  if (!data.configured) {
+    els.trajectoryGfw.innerHTML =
+      `<div class="trajectory-heading">Global Fishing Watch</div>` +
+      `<div>Token not configured in local <code>.env</code>.</div>`;
+    return;
+  }
+  if (!data.matched) {
+    const reason = data.error ? ` · ${escapeHtml(data.error)}` : "";
+    els.trajectoryGfw.innerHTML =
+      `<div class="trajectory-heading">Global Fishing Watch</div>` +
+      `<div>No identity match${reason}.</div>`;
+    return;
+  }
+  const details = [
+    data.name,
+    data.flag ? `flag ${data.flag}` : "",
+    data.imo && data.imo !== "0" ? `IMO ${data.imo}` : "",
+    (data.ship_types || []).join(", "),
+    Number.isFinite(Number(data.positions_count))
+      ? `${Number(data.positions_count).toLocaleString()} historical positions`
+      : "",
+  ].filter(Boolean);
+  els.trajectoryGfw.innerHTML =
+    `<div class="trajectory-heading">Global Fishing Watch identity</div>` +
+    `<div>${details.map(escapeHtml).join(" · ")}</div>`;
+}
+
+async function loadGfwIdentity(mmsi) {
+  if (state.gfwCache.has(mmsi)) {
+    renderGfwIdentity(state.gfwCache.get(mmsi));
+    return;
+  }
+  els.trajectoryGfw.innerHTML =
+    `<div class="trajectory-heading">Global Fishing Watch</div><div>Checking vessel identity…</div>`;
+  try {
+    const data = await getJson(`/api/global/${encodeURIComponent(mmsi)}/gfw`);
+    state.gfwCache.set(mmsi, data);
+    if (state.selectedMmsi === mmsi) renderGfwIdentity(data);
+  } catch (err) {
+    if (state.selectedMmsi === mmsi) {
+      renderGfwIdentity({ configured: true, matched: false, error: "request_failed" });
+    }
+  }
+}
+
 function showTrajectory(v) {
   state.selectedMmsi = v.mmsi;
   state.selectedVessel = v;
@@ -584,7 +645,12 @@ function showTrajectory(v) {
     );
   }
   if (context.in_sanctuary) contextLines.push("Inside Monterey Bay sanctuary");
-  if (context.in_port) contextLines.push("Inside Port of San Francisco geofence");
+  if (context.in_port) {
+    contextLines.push(
+      `${escapeHtml(context.port?.name || "SAN FRANCISCO")} port · ` +
+      `${Number(context.port?.distance_km || 0).toFixed(1)} km · NGA World Port Index`
+    );
+  }
   if (context.on_land) contextLines.push("Position intersects coastline data");
   for (const cable of context.near_cables || []) {
     contextLines.push(`${escapeHtml(cable.name)} cable · ${Number(cable.distance_km).toFixed(1)} km`);
@@ -592,6 +658,7 @@ function showTrajectory(v) {
   els.trajectoryContext.innerHTML = contextLines.length
     ? `<div class="trajectory-heading">Reference-data matches</div>${contextLines.map((line) => `<div>${line}</div>`).join("")}`
     : `<div class="context-clear">No bundled reference-data match at this position.</div>`;
+  loadGfwIdentity(v.mmsi);
   els.trajectoryRisk.innerHTML =
     `<div class="trajectory-heading">Financial response range</div>` +
     `<div class="trajectory-cost">${formatUsd(risk.low_usd)}–${formatUsd(risk.high_usd)}</div>`;

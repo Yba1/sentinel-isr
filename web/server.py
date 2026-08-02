@@ -45,6 +45,7 @@ from aiohttp import web, WSMsgType
 
 from data.scenario import load_scenario
 from data.global_ais import GlobalAisFeed, global_snapshot
+from data.global_fishing_watch import GlobalFishingWatchClient
 from data.maritime_context import maritime_context
 from aegis.graph import build_mission
 from aegis.main import run_frame_scored
@@ -213,6 +214,8 @@ def build_app(cache: dict) -> web.Application:
 
     api_key = os.environ.get("AISSTREAM_API_KEY", "")
     app["global_feed"] = GlobalAisFeed(api_key) if api_key else None
+    gfw_token = os.environ.get("GFW_API_TOKEN", "")
+    app["gfw_client"] = GlobalFishingWatchClient(gfw_token) if gfw_token else None
 
     async def start_global_feed(app: web.Application) -> None:
         if app["global_feed"] is not None:
@@ -387,8 +390,24 @@ def build_app(cache: dict) -> web.Application:
     async def api_context_layers(request: web.Request) -> web.Response:
         return web.json_response({"layers": maritime_context().layer_payloads()})
 
+    async def api_gfw_identity(request: web.Request) -> web.Response:
+        mmsi = int(request.match_info["mmsi"])
+        client = app["gfw_client"]
+        if client is None:
+            return web.json_response({
+                "configured": False,
+                "matched": False,
+                "mmsi": mmsi,
+                "source": "Global Fishing Watch",
+            })
+        return web.json_response({
+            "configured": True,
+            **await client.vessel_identity(mmsi),
+        })
+
     app.router.add_get("/api/global", api_global)
     app.router.add_get("/api/context/layers", api_context_layers)
+    app.router.add_get(r"/api/global/{mmsi:\d{9}}/gfw", api_gfw_identity)
     app.router.add_get("/api/scenario", api_scenario)
     app.router.add_get("/api/state", api_state)
     app.router.add_post("/api/play", api_play)

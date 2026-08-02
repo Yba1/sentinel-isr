@@ -36,7 +36,7 @@ _LAYER_SPECS = {
     },
     "port": {
         "file": "port_of_sf_geofence.geojson",
-        "name": "Port of San Francisco",
+        "name": "Port of San Francisco · NGA World Port Index",
         "kind": "port",
         "style": {"color": "#38bdf8", "weight": 2, "fillOpacity": 0.08},
     },
@@ -166,11 +166,12 @@ class MaritimeContext:
             if in_california_extent
             else False
         )
-        in_port = (
-            self._prepared["port"].covers(point)
+        port_distance_km = (
+            self._geometries["port"].distance(point) * 111.32
             if in_california_extent
-            else False
+            else float("inf")
         )
+        in_port = port_distance_km <= 12.0
         nearest_cables: list[dict[str, Any]] = []
         if in_california_extent:
             for name, geometry in self._cables:
@@ -187,6 +188,11 @@ class MaritimeContext:
             "on_land": bool(on_land),
             "in_sanctuary": bool(in_sanctuary),
             "in_port": bool(in_port),
+            "port": {
+                "name": "SAN FRANCISCO",
+                "distance_km": round(port_distance_km, 1),
+                "source": "NGA World Port Index",
+            } if in_port else None,
             "near_cables": nearest_cables[:3],
             "ofac": ofac,
         }

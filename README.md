@@ -48,6 +48,7 @@ Optional `.env` values:
 
 ```dotenv
 AISSTREAM_API_KEY=
+GFW_API_TOKEN=
 AEGIS_PACK=s02_synthetic_demo
 AEGIS_FRAMES=-1
 AEGIS_LLM=mockllm
@@ -82,9 +83,12 @@ See `DATA_SOURCES.md` for map and scenario data sources.
 Every bundled reference dataset participates at runtime:
 
 - California coastline checks impossible/grounding positions.
-- Monterey Bay sanctuary and Port of San Francisco boundaries add geofence context.
+- Monterey Bay sanctuary geometry adds protected-water context.
+- NGA World Port Index supplies official port location and facility metadata.
 - Submarine-cable geometry adds proximity alerts.
 - The OFAC vessel subset screens live contacts by MMSI, IMO, call sign, and name.
+- Global Fishing Watch optionally enriches clicked contacts with vessel identity
+  and registry-derived classifications.
 - All four scenario packs remain selectable from the dashboard.
 
 The same layers are drawn on the map, and each live-contact click combines
