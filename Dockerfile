@@ -5,8 +5,7 @@ FROM python:3.12-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PORT=8080
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
@@ -25,9 +24,9 @@ RUN pip install --upgrade pip \
 
 COPY . .
 
-# Healthcheck hits the dashboard once the aiohttp server is up.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null || exit 1
-
+# Railway injects $PORT at runtime. Default to 8080 only for local docker runs.
+ENV PORT=8080
 EXPOSE 8080
+
+# Bound to 0.0.0.0:$PORT inside web/server.py
 CMD ["python", "web/server.py"]
