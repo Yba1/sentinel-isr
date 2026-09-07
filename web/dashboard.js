@@ -244,10 +244,16 @@ const BoatCanvasRenderer = L.Canvas.extend({
   },
 });
 
-L.tileLayer(
+function cartoBasemapUrl() {
+  const key = String(window.AEGIS_CARTO_KEY || "").trim();
+  const query = key ? `?key=${encodeURIComponent(key)}` : "";
   // CARTO retired the "dark_matter" path (404s now); "dark_all" is the
   // live equivalent -- confirmed by curl against basemaps.cartocdn.com.
-  "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+  return `https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png${query}`;
+}
+
+L.tileLayer(
+  cartoBasemapUrl(),
   {
     subdomains: "abcd",
     minZoom: 2,
@@ -1766,7 +1772,7 @@ function prepareSimulationMap(bounds) {
       markerZoomAnimation: false,
     });
     L.tileLayer(
-      "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+      cartoBasemapUrl(),
       {
         subdomains: "abcd",
         minZoom: 2,

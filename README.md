@@ -52,6 +52,7 @@ Optional `.env` values:
 
 ```dotenv
 AISSTREAM_API_KEY=
+CARTOAPIKEY=
 GFW_API_TOKEN=
 COPERNICUS_MARINE_USERNAME=
 COPERNICUS_MARINE_PASSWORD=
@@ -76,6 +77,11 @@ AISStream remains the primary global provider. To switch back, set
 AISStream key, that provider's live view remains empty and clearly reports that
 configuration is required. Aegis never substitutes synthetic contacts. Without
 an LLM provider key, it uses deterministic offline brief text.
+
+`CARTOAPIKEY` is the raster basemap key from
+[carto.com/basemaps/apikey](https://carto.com/basemaps/apikey). Without it,
+CARTO still serves tiles but watermarks them. The dashboard reads the key from
+the server at `/api/runtime-config.js` and appends it to the tile URL.
 
 With `AISSTREAM_API_KEY` set, Aegis subscribes to position plus static/voyage
 reports across ten high-traffic maritime regions. It retains bounded track

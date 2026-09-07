@@ -5,8 +5,9 @@
 - Coastline geometry: [Natural Earth](https://www.naturalearthdata.com/)
 - Sanctions demonstration subset: [U.S. Treasury OFAC Sanctions List](https://ofac.treasury.gov/sanctions-list-service)
 - Submarine cable demonstration geometry: [TeleGeography Submarine Cable Map](https://www.submarinecablemap.com/)
-- Basemap tiles: [CARTO](https://carto.com/attributions) with
-  [OpenStreetMap](https://www.openstreetmap.org/copyright) data
+- Basemap tiles: [CARTO](https://carto.com/attributions) raster `dark_all`
+  tiles with [OpenStreetMap](https://www.openstreetmap.org/copyright) data.
+  Raster requests require `CARTOAPIKEY` or CARTO watermarks the tiles.
 - Navigable-water constraints: [OpenFreeMap](https://openfreemap.org/) vector
   tiles using the [OpenMapTiles](https://openmaptiles.org/schema/) schema and
   [OpenStreetMap](https://www.openstreetmap.org/copyright) coastline, harbor,

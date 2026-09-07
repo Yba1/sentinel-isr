@@ -62,6 +62,7 @@ from aegis.main import run_frame_scored
 from aegis.fusion import assoc_provenance as main_assoc_source
 from aegis import jtms
 from aegis.brief import panel_payload
+from aegis.runtime_config import runtime_carto_config_js
 from tracker.metrics import TrackingMetrics
 from tracker import eval as tracker_eval
 
@@ -850,6 +851,15 @@ def build_app(cache: dict) -> web.Application:
     app.router.add_get("/api/jtms/state", api_jtms_state)
     app.router.add_get("/api/brief", api_brief)
     app.router.add_get("/api/eval", api_eval)
+
+    async def api_runtime_config(_request: web.Request) -> web.Response:
+        return web.Response(
+            text=runtime_carto_config_js(),
+            content_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    app.router.add_get("/api/runtime-config.js", api_runtime_config)
 
     # -------------------------------------------------------------------- WS
 
