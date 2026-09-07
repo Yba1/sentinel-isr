@@ -45,7 +45,11 @@ import numpy as np
 from aiohttp import web, WSMsgType
 
 from data.scenario import load_scenario
-from data.global_ais import create_global_feed, global_snapshot
+from data.global_ais import (
+    create_global_feed,
+    global_snapshot,
+    resolve_runtime_provider,
+)
 from data.dark_prediction import predict_dark_vessel
 from data.global_fishing_watch import GlobalFishingWatchClient
 from data.maritime_context import maritime_context
@@ -219,7 +223,10 @@ def build_app(cache: dict) -> web.Application:
     app.on_startup.append(start_player)
 
     api_key = os.environ.get("AISSTREAM_API_KEY", "")
-    ais_provider = os.environ.get("AEGIS_AIS_PROVIDER", "aisstream")
+    ais_provider = resolve_runtime_provider(
+        os.environ.get("AEGIS_AIS_PROVIDER", "aisstream"),
+        aisstream_api_key=api_key,
+    )
     ais_state_path = Path(os.environ.get(
         "AEGIS_AIS_STATE_PATH",
         REPO_ROOT / ".aegis" / "ais_state.json.gz",
@@ -236,6 +243,12 @@ def build_app(cache: dict) -> web.Application:
         ais_provider,
         aisstream_api_key=api_key,
         state_path=provider_state_path,
+    )
+    print(
+        f"[server] AIS provider={ais_provider} "
+        f"key_configured={bool(api_key.strip())} "
+        f"feed_configured={app['global_feed'] is not None}",
+        flush=True,
     )
     gfw_token = os.environ.get("GFW_API_TOKEN", "")
     wdpa_path = os.environ.get("AEGIS_WDPA_CSV", "")

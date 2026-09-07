@@ -695,6 +695,19 @@ class DigitrafficAisFeed(GlobalAisFeed):
         }
 
 
+def resolve_runtime_provider(provider: str, *, aisstream_api_key: str = "") -> str:
+    """Choose the live AIS provider for this process.
+
+    AISStream is primary whenever an API key is configured, even if a leftover
+    AEGIS_AIS_PROVIDER=digitraffic value is still set in the host environment.
+    Digitraffic remains the fallback when no AISStream key is present.
+    """
+    normalized = (provider or "aisstream").strip().lower() or "aisstream"
+    if aisstream_api_key.strip():
+        return "aisstream"
+    return normalized
+
+
 def create_global_feed(
     provider: str,
     *,

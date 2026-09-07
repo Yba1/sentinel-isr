@@ -204,6 +204,18 @@ def test_position_reports_build_bounded_history():
     assert len(feed.vessels[123456789]["history"]) == global_ais.MAX_HISTORY
 
 
+def test_runtime_provider_uses_aisstream_when_api_key_is_configured():
+    assert global_ais.resolve_runtime_provider(
+        "digitraffic", aisstream_api_key="test-key"
+    ) == "aisstream"
+    assert global_ais.resolve_runtime_provider(
+        "digitraffic", aisstream_api_key=""
+    ) == "digitraffic"
+    assert global_ais.resolve_runtime_provider(
+        "aisstream", aisstream_api_key=""
+    ) == "aisstream"
+
+
 def test_provider_factory_keeps_aisstream_and_digitraffic_selectable(tmp_path):
     aisstream = global_ais.create_global_feed(
         "aisstream",
