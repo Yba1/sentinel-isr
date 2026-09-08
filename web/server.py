@@ -147,17 +147,81 @@ def history_for(cache: dict, frame_idx: int) -> tuple[list[str], list[dict]]:
     return log, alerts
 
 
+def placeholder_cache(pack_id: str, assoc_mode: str = "global") -> dict:
+    """Tiny cache so HTTP can bind before the tracker replay is computed."""
+    frame = {
+        "frame_idx": 0,
+        "t": 0.0,
+        "clock": "00:00",
+        "tracks": [],
+        "measurements": [],
+        "alerts": [],
+        "log": [],
+        "removed_track_ids": [],
+        "zones": [],
+        "stats": {
+            "n_tracks": 0,
+            "n_dark": 0,
+            "n_meas": 0,
+            "n_suppressed": 0,
+            "n_matched": 0,
+        },
+        "financial_risk": {"low_usd": 0, "high_usd": 0, "items": []},
+        "id_switches": 0,
+    }
+    return {
+        "pack_id": pack_id,
+        "assoc_mode": assoc_mode,
+        "frame_interval_s": 1.0,
+        "zones": [],
+        "frames": [frame],
+        "all_log": [],
+        "all_alerts": [],
+        "log_end": [0],
+        "alert_end": [0],
+        "expected": {},
+    }
+
+
+async def _warm_replay_cache(app: web.Application) -> None:
+    pack_id = app.get("boot_pack_id")
+    if not pack_id:
+        return
+    max_frames = int(app.get("boot_max_frames", -1))
+    print(f"[server] precomputing {pack_id} ...", flush=True)
+    t0 = time.perf_counter()
+    try:
+        cache = await asyncio.to_thread(precompute, pack_id, max_frames)
+    except Exception as exc:
+        print(f"[server] precompute failed: {type(exc).__name__}: {exc}", flush=True)
+        return
+    key = (cache["pack_id"], cache["assoc_mode"])
+    app["caches"][key] = cache
+    app["playback"]["active_key"] = key
+    n = len(cache["frames"])
+    print(
+        f"[server] cached {n} frames in {time.perf_counter() - t0:.1f}s "
+        f"(id_switches so far: {cache['frames'][-1]['id_switches'] if n else 0})",
+        flush=True,
+    )
+
+
 # ------------------------------------------------------------------- playback
 
-def build_app(cache: dict) -> web.Application:
+def build_app(
+    cache: dict,
+    *,
+    boot_pack_id: str | None = None,
+    boot_max_frames: int = -1,
+) -> web.Application:
     app = web.Application()
     app["caches"] = {(cache["pack_id"], cache["assoc_mode"]): cache}
-    app["active_key"] = (cache["pack_id"], cache["assoc_mode"])
+    app["playback"] = {"active_key": (cache["pack_id"], cache["assoc_mode"])}
     app["state"] = {"frame_idx": 0, "playing": False, "speed": 10.0}
     app["clients"] = set()
 
     def active() -> dict:
-        return app["caches"][app["active_key"]]
+        return app["caches"][app["playback"]["active_key"]]
 
     def n_frames() -> int:
         return len(active()["frames"])
@@ -283,19 +347,27 @@ def build_app(cache: dict) -> web.Application:
     app["prediction_tasks"] = {}
     app["terrain_tasks"] = {}
     app["terrain_ready"] = set()
+    app["snapshot_state"] = {"cache": None}
+    app["global_snapshot_lock"] = asyncio.Lock()
+    app["boot_pack_id"] = boot_pack_id
+    app["boot_max_frames"] = boot_max_frames
+
+    app["tasks"] = {"global_feed": None, "precompute": None}
 
     async def start_global_feed(app: web.Application) -> None:
         if app["global_feed"] is not None:
-            app["global_feed_task"] = asyncio.create_task(app["global_feed"].run())
+            app["tasks"]["global_feed"] = asyncio.create_task(app["global_feed"].run())
+        if app.get("boot_pack_id"):
+            app["tasks"]["precompute"] = asyncio.create_task(_warm_replay_cache(app))
 
     async def stop_global_feed(app: web.Application) -> None:
-        task = app.get("global_feed_task")
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        for task in app["tasks"].values():
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         feed = app.get("global_feed")
         if feed is not None:
             feed.save_state()
@@ -364,7 +436,7 @@ def build_app(cache: dict) -> web.Application:
         startup; s01's 326-vessel window can take a couple of minutes the
         first time, this is not a demo shortcut."""
         body = await _body(request)
-        cur_pack, cur_mode = app["active_key"]
+        cur_pack, cur_mode = app["playback"]["active_key"]
         pack_id = body.get("pack_id", cur_pack)
         assoc_mode = body.get("assoc_mode", cur_mode)
         if pack_id not in KNOWN_PACKS:
@@ -374,7 +446,7 @@ def build_app(cache: dict) -> web.Application:
         key = (pack_id, assoc_mode)
         if key not in app["caches"]:
             app["caches"][key] = precompute(pack_id, assoc_mode=assoc_mode)
-        app["active_key"] = key
+        app["playback"]["active_key"] = key
         app["state"]["frame_idx"] = 0
         app["state"]["playing"] = False
         cache = app["caches"][key]
@@ -463,7 +535,44 @@ def build_app(cache: dict) -> web.Application:
             since = max(0, int(request.query.get("since", "0")))
         except ValueError:
             return web.json_response({"error": "since must be an integer"}, status=400)
-        return web.json_response(global_snapshot(app["global_feed"], since=since))
+        now = time.monotonic()
+        cached = app["snapshot_state"]["cache"]
+        if cached and now - cached["at"] < 0.8 and cached["since"] == since:
+            return web.json_response(cached["payload"])
+        lock = app.get("global_snapshot_lock")
+        if lock is None:
+            return web.json_response(global_snapshot(app["global_feed"], since=since))
+        async with lock:
+            cached = app["snapshot_state"]["cache"]
+            now = time.monotonic()
+            if cached and now - cached["at"] < 0.8 and cached["since"] == since:
+                return web.json_response(cached["payload"])
+            try:
+                payload = global_snapshot(app["global_feed"], since=since)
+            except Exception as exc:
+                print(
+                    f"[server] /api/global failed: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                if cached:
+                    return web.json_response(cached["payload"])
+                payload = {
+                    "live": False,
+                    "vessels": [],
+                    "removed": [],
+                    "revision": since,
+                    "full": since <= 0,
+                    "status": {
+                        "configured": app["global_feed"] is not None,
+                        "last_error": type(exc).__name__,
+                    },
+                }
+            app["snapshot_state"]["cache"] = {
+                "at": time.monotonic(),
+                "since": since,
+                "payload": payload,
+            }
+            return web.json_response(payload)
 
     async def api_global_pin(request: web.Request) -> web.Response:
         feed = app["global_feed"]
@@ -893,6 +1002,8 @@ def build_app(cache: dict) -> web.Application:
         await ws.prepare(request)
         app["clients"].add(ws)
         cache = active()
+        frames = cache["frames"]
+        frame_idx = min(app["state"]["frame_idx"], max(0, len(frames) - 1))
 
         await ws.send_str(json.dumps({
             "type": "init",
@@ -900,11 +1011,18 @@ def build_app(cache: dict) -> web.Application:
             "assoc_mode": cache["assoc_mode"],
             "assoc_source": main_assoc_source(cache["assoc_mode"]),
             "frame_interval_s": cache["frame_interval_s"],
-            "total_frames": len(cache["frames"]),
+            "total_frames": len(frames),
             "zones": cache["zones"],
             "known_packs": KNOWN_PACKS,
         }))
-        frame_idx = app["state"]["frame_idx"]
+        if not frames:
+            try:
+                async for msg in ws:
+                    if msg.type == WSMsgType.ERROR:
+                        break
+            finally:
+                app["clients"].discard(ws)
+            return ws
         log, alerts = history_for(cache, frame_idx)
         await ws.send_str(json.dumps({
             "type": "sync",
@@ -958,17 +1076,12 @@ def main() -> None:
         if max_frames < 0 or max_frames > 12:
             max_frames = 8
 
-    print(f"[server] precomputing {pack_id} ...", flush=True)
-    t0 = time.perf_counter()
-    cache = precompute(pack_id, max_frames)
-    n = len(cache["frames"])
-    print(
-        f"[server] cached {n} frames in {time.perf_counter() - t0:.1f}s "
-        f"(id_switches so far: {cache['frames'][-1]['id_switches'] if n else 0})",
-        flush=True,
+    print(f"[server] binding HTTP on port {port} ...", flush=True)
+    app = build_app(
+        placeholder_cache(pack_id),
+        boot_pack_id=pack_id,
+        boot_max_frames=max_frames,
     )
-
-    app = build_app(cache)
     web.run_app(app, host="0.0.0.0", port=port)
 
 

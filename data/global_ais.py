@@ -39,20 +39,27 @@ DIGITRAFFIC_DARK_AFTER_S = max(
     float(os.getenv("AEGIS_DIGITRAFFIC_DARK_AFTER_SECONDS", "180")),
 )
 DIGITRAFFIC_METADATA_REFRESH_SECONDS = 5 * 60
-MAX_TRACKED = min(int(os.getenv("AEGIS_MAX_ACTIVE_VESSELS", "8000")), 12000)
+_ON_RAILWAY = bool(os.getenv("RAILWAY_ENVIRONMENT"))
+MAX_TRACKED = min(
+    int(os.getenv("AEGIS_MAX_ACTIVE_VESSELS", "2000" if _ON_RAILWAY else "8000")),
+    2500 if _ON_RAILWAY else 12000,
+)
 DARK_AFTER_S = 45.0  # no fresh position report: render as a coasting contact
 MAX_HISTORY = 20
 MAX_TOMBSTONES = 50000
 STATE_RETENTION_S = 24 * 60 * 60
 STATE_RESTORE_MAX = 2500
-SNAPSHOT_LIMIT = min(int(os.getenv("AEGIS_SNAPSHOT_LIMIT", "2500")), 4000)
+SNAPSHOT_LIMIT = min(
+    int(os.getenv("AEGIS_SNAPSHOT_LIMIT", "600" if _ON_RAILWAY else "1200")),
+    2500,
+)
 SNAPSHOT_SKIP_FIELDS = frozenset({"history", "history_samples"})
-INGEST_YIELD_EVERY = 15
+INGEST_YIELD_EVERY = 5 if _ON_RAILWAY else 15
 
 # Busy maritime regions across every inhabited continent. A single world box
 # can deliver thousands of messages per second and starve the API server; these
 # boxes retain global operational coverage while keeping one process responsive.
-REGIONAL_BOXES = [
+ALL_REGIONAL_BOXES = [
     [[35, -10], [65, 30]],       # North Sea / Western Europe
     [[20, 100], [45, 145]],      # East Asia / Sea of Japan
     [[-40, 110], [-10, 155]],    # Australia
@@ -64,6 +71,14 @@ REGIONAL_BOXES = [
     [[-10, 90], [20, 125]],      # Malacca / Indonesia
     [[-40, 10], [-20, 45]],      # Southern Africa
 ]
+# Ten world boxes can deliver thousands of messages per second and OOM a
+# single Railway process as soon as the dashboard opens. Keep global
+# coverage locally; subscribe to the busiest four regions in production.
+REGIONAL_BOXES = (
+    ALL_REGIONAL_BOXES[:4]
+    if _ON_RAILWAY
+    else ALL_REGIONAL_BOXES
+)
 
 # ------------------------------------------------------------------- real feed
 
@@ -356,8 +371,12 @@ class GlobalAisFeed:
         backoff = 2.0
         while True:
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.ws_connect(AISSTREAM_WS_URL) as ws:
+                timeout = aiohttp.ClientTimeout(total=None, sock_connect=CONNECT_TIMEOUT_S)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.ws_connect(
+                        AISSTREAM_WS_URL,
+                        heartbeat=30.0,
+                    ) as ws:
                         self.connected = True
                         self.last_error = ""
                         await ws.send_str(json.dumps({
@@ -372,6 +391,13 @@ class GlobalAisFeed:
                         since_yield = 0
                         async for msg in ws:
                             if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
+                                at_cap = len(self._active_order) >= MAX_TRACKED
+                                if at_cap and (since_yield % 4):
+                                    since_yield += 1
+                                    if since_yield >= INGEST_YIELD_EVERY:
+                                        since_yield = 0
+                                        await asyncio.sleep(0)
+                                    continue
                                 try:
                                     self._handle_message(msg.data)
                                 except (ValueError, TypeError, KeyError, UnicodeDecodeError):
@@ -392,7 +418,13 @@ class GlobalAisFeed:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
 
-    def _snapshot_rows(self, since: int = 0, only_mmsi: int | None = None) -> list[dict]:
+    def _snapshot_rows(
+        self,
+        since: int = 0,
+        only_mmsi: int | None = None,
+        *,
+        annotate: bool = False,
+    ) -> list[dict]:
         now = time.time()
         vessels = []
         items = (
@@ -417,6 +449,9 @@ class GlobalAisFeed:
             }
             row["age_s"] = round(age_s, 1)
             row["dark"] = dark
+            if not annotate:
+                vessels.append(row)
+                continue
             annotation_key = (row["lat"], row["lon"], dark)
             if fix.get("_annotation_key") != annotation_key:
                 fix["_annotation"] = maritime_context().annotate(row)
@@ -431,7 +466,7 @@ class GlobalAisFeed:
         return self._snapshot_rows()
 
     def vessel_snapshot(self, mmsi: int) -> dict | None:
-        rows = self._snapshot_rows(only_mmsi=mmsi)
+        rows = self._snapshot_rows(only_mmsi=mmsi, annotate=True)
         return rows[0] if rows else None
 
     def snapshot_since(self, since: int = 0) -> dict:
@@ -765,18 +800,10 @@ def create_global_feed(
     )
 
 
-def global_snapshot(feed: "GlobalAisFeed | None", since: int = 0) -> dict:
-    """Return real AIS contacts, or an explicit empty/offline state."""
-    if feed is not None and feed.live and feed.vessels:
-        delta = feed.snapshot_since(since)
-        return {"live": True, **delta, "status": feed.status()}
-    return {
-        "live": False,
-        "vessels": [],
-        "removed": [],
-        "revision": feed.revision if feed is not None else 0,
-        "full": since <= 0,
-        "status": {**feed.status(), "configured": True} if feed is not None else {
+def _offline_snapshot(feed: "GlobalAisFeed | None", since: int = 0, last_error: str = "") -> dict:
+    status = (
+        {**feed.status(), "configured": True}
+        if feed is not None else {
             "configured": False,
             "provider": "aisstream",
             "coverage": "selected global maritime regions",
@@ -790,5 +817,26 @@ def global_snapshot(feed: "GlobalAisFeed | None", since: int = 0) -> dict:
             "regions": len(REGIONAL_BOXES),
             "max_tracked": MAX_TRACKED,
             "dark_after_s": DARK_AFTER_S,
-        },
+        }
+    )
+    if last_error:
+        status["last_error"] = last_error
+    return {
+        "live": False,
+        "vessels": [],
+        "removed": [],
+        "revision": feed.revision if feed is not None else 0,
+        "full": since <= 0,
+        "status": status,
     }
+
+
+def global_snapshot(feed: "GlobalAisFeed | None", since: int = 0) -> dict:
+    """Return real AIS contacts, or an explicit empty/offline state."""
+    try:
+        if feed is not None and feed.live and feed.vessels:
+            delta = feed.snapshot_since(since)
+            return {"live": True, **delta, "status": feed.status()}
+        return _offline_snapshot(feed, since)
+    except Exception as exc:
+        return _offline_snapshot(feed, since, last_error=type(exc).__name__)

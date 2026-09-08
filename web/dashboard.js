@@ -3761,8 +3761,9 @@ function setGlobalLayer() {
 }
 
 let globalPollTimer = null;
+let globalPollInFlight = false;
 const GLOBAL_POLL_MS = 2500;
-const GLOBAL_POLL_LOADING_MS = 400;
+const GLOBAL_POLL_LOADING_MS = 1000;
 
 function syncAisLoading() {
   const root = document.getElementById("ais-loading");
@@ -3803,6 +3804,8 @@ function setGlobalPollInterval(ms) {
 }
 
 async function pollGlobal() {
+  if (globalPollInFlight) return;
+  globalPollInFlight = true;
   try {
     const data = await getJson(`/api/global?since=${state.globalRevision}`);
     state.globalLive = !!data.live;
@@ -3873,6 +3876,8 @@ async function pollGlobal() {
     );
   } catch (_err) {
     state.globalStatus = { ...state.globalStatus, connected: false };
+  } finally {
+    globalPollInFlight = false;
   }
   syncAisLoading();
 }

@@ -236,6 +236,40 @@ def test_list_snapshot_omits_track_history():
     assert "history_samples" not in row
 
 
+def test_list_snapshot_skips_maritime_annotation(monkeypatch):
+    feed = global_ais.GlobalAisFeed("not-a-real-key")
+    feed._record(123456789, {"lat": 1.0, "lon": 2.0, "name": "Slim"})
+
+    def boom():
+        raise AssertionError("list snapshots must not annotate every contact")
+
+    monkeypatch.setattr(global_ais, "maritime_context", boom)
+
+    row = feed.snapshot()[0]
+    payload = feed.snapshot_since(0)
+
+    assert row["mmsi"] == 123456789
+    assert "context" not in row
+    assert payload["vessels"][0]["mmsi"] == 123456789
+
+
+def test_vessel_snapshot_annotates_selected_contact(monkeypatch):
+    feed = global_ais.GlobalAisFeed("not-a-real-key")
+    feed._record(123456789, {"lat": 1.0, "lon": 2.0, "name": "Slim"})
+
+    class FakeContext:
+        def annotate(self, row):
+            annotated = dict(row)
+            annotated["context"] = {"ofac": None, "in_sanctuary": False}
+            return annotated
+
+    monkeypatch.setattr(global_ais, "maritime_context", lambda: FakeContext())
+
+    vessel = feed.vessel_snapshot(123456789)
+
+    assert vessel["context"]["in_sanctuary"] is False
+
+
 def test_full_snapshot_caps_contacts(monkeypatch):
     monkeypatch.setattr(global_ais, "SNAPSHOT_LIMIT", 3)
     feed = global_ais.GlobalAisFeed("not-a-real-key")
