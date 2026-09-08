@@ -102,6 +102,10 @@ class GlobalAisFeed:
         """Restore real last-report timestamps saved during a prior run."""
         if self.state_path is None or not self.state_path.is_file():
             return
+        # A multi-megabyte gzip of 24h of global AIS will OOM a single
+        # Railway instance during json.load, before HTTP can answer.
+        if self.state_path.stat().st_size > 800_000:
+            return
         now = time.time()
         try:
             with gzip.open(self.state_path, "rt", encoding="utf-8") as stream:
@@ -155,7 +159,7 @@ class GlobalAisFeed:
             if float(vessel.get("last_seen", 0.0)) >= cutoff
         ]
         rows.sort(key=lambda row: float(row.get("last_seen", 0.0)), reverse=True)
-        rows = rows[:MAX_TRACKED]
+        rows = rows[: min(MAX_TRACKED, STATE_RESTORE_MAX)]
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
         with gzip.open(temporary, "wt", encoding="utf-8") as stream:

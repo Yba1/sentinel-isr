@@ -64,6 +64,15 @@ def test_persisted_last_report_preserves_total_silence_age(monkeypatch, tmp_path
     assert vessel["dark"] is True
 
 
+def test_oversized_ais_state_file_is_skipped(tmp_path):
+    state_path = tmp_path / "ais-state.json.gz"
+    state_path.write_bytes(b"0" * 800_001)
+
+    feed = global_ais.GlobalAisFeed("not-a-real-key", state_path=state_path)
+
+    assert feed.vessels == {}
+
+
 def test_static_voyage_data_merges_without_refreshing_position_age(monkeypatch):
     now = [1_700_000_000.0]
     monkeypatch.setattr(global_ais.time, "time", lambda: now[0])
