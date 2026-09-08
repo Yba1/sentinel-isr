@@ -102,9 +102,9 @@ class GlobalAisFeed:
         """Restore real last-report timestamps saved during a prior run."""
         if self.state_path is None or not self.state_path.is_file():
             return
-        # A multi-megabyte gzip of 24h of global AIS will OOM a single
-        # Railway instance during json.load, before HTTP can answer.
-        if self.state_path.stat().st_size > 800_000:
+        # Persisted global AIS is a restart convenience, not required to
+        # serve HTTP. On Railway a leftover multi-MB gzip OOMs the process.
+        if os.environ.get("RAILWAY_ENVIRONMENT") or self.state_path.stat().st_size > 200_000:
             return
         now = time.time()
         try:

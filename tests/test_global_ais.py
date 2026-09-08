@@ -66,11 +66,23 @@ def test_persisted_last_report_preserves_total_silence_age(monkeypatch, tmp_path
 
 def test_oversized_ais_state_file_is_skipped(tmp_path):
     state_path = tmp_path / "ais-state.json.gz"
-    state_path.write_bytes(b"0" * 800_001)
+    state_path.write_bytes(b"0" * 200_001)
 
     feed = global_ais.GlobalAisFeed("not-a-real-key", state_path=state_path)
 
     assert feed.vessels == {}
+
+
+def test_railway_skips_ais_state_restore(monkeypatch, tmp_path):
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    state_path = tmp_path / "ais-state.json.gz"
+    feed = global_ais.GlobalAisFeed("not-a-real-key", state_path=state_path)
+    feed._record(123456789, {"lat": 1.0, "lon": 2.0})
+    feed.save_state()
+
+    restored = global_ais.GlobalAisFeed("not-a-real-key", state_path=state_path)
+
+    assert restored.vessels == {}
 
 
 def test_static_voyage_data_merges_without_refreshing_position_age(monkeypatch):

@@ -62,7 +62,7 @@ from aegis.main import run_frame_scored
 from aegis.fusion import assoc_provenance as main_assoc_source
 from aegis import jtms
 from aegis.brief import panel_payload
-from aegis.runtime_config import runtime_carto_config_js
+from aegis.runtime_config import carto_api_key, runtime_carto_config_js
 from tracker.metrics import TrackingMetrics
 from tracker import eval as tracker_eval
 
@@ -240,15 +240,20 @@ def build_app(cache: dict) -> web.Application:
             f"{ais_state_path.suffix}"
         )
     )
-    app["global_feed"] = create_global_feed(
-        ais_provider,
-        aisstream_api_key=api_key,
-        state_path=provider_state_path,
-    )
+    try:
+        app["global_feed"] = create_global_feed(
+            ais_provider,
+            aisstream_api_key=api_key,
+            state_path=provider_state_path,
+        )
+    except Exception as exc:
+        print(f"[server] AIS feed init failed: {type(exc).__name__}: {exc}", flush=True)
+        app["global_feed"] = None
     print(
         f"[server] AIS provider={ais_provider} "
         f"key_configured={bool(api_key.strip())} "
-        f"feed_configured={app['global_feed'] is not None}",
+        f"feed_configured={app['global_feed'] is not None} "
+        f"carto_key_configured={bool(carto_api_key())}",
         flush=True,
     )
     gfw_token = os.environ.get("GFW_API_TOKEN", "")
