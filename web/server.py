@@ -219,6 +219,12 @@ def build_app(
     app["playback"] = {"active_key": (cache["pack_id"], cache["assoc_mode"])}
     app["state"] = {"frame_idx": 0, "playing": False, "speed": 10.0}
     app["clients"] = set()
+    app["tasks"] = {
+        "player": None,
+        "global_feed": None,
+        "precompute": None,
+        "ais_boot": None,
+    }
 
     def active() -> dict:
         return app["caches"][app["playback"]["active_key"]]
@@ -283,7 +289,7 @@ def build_app(
                 await asyncio.sleep(0.05)
 
     async def start_player(app: web.Application) -> None:
-        app["player_task"] = asyncio.create_task(player_loop(app))
+        app["tasks"]["player"] = asyncio.create_task(player_loop(app))
 
     app.on_startup.append(start_player)
 
@@ -347,16 +353,21 @@ def build_app(
     app["prediction_tasks"] = {}
     app["terrain_tasks"] = {}
     app["terrain_ready"] = set()
-    app["snapshot_state"] = {"cache": None}
-    app["global_snapshot_lock"] = asyncio.Lock()
+    app["snapshot_state"] = {"cache": None, "lock": None}
     app["boot_pack_id"] = boot_pack_id
     app["boot_max_frames"] = boot_max_frames
 
-    app["tasks"] = {"global_feed": None, "precompute": None}
-
     async def start_global_feed(app: web.Application) -> None:
-        if app["global_feed"] is not None:
-            app["tasks"]["global_feed"] = asyncio.create_task(app["global_feed"].run())
+        app["snapshot_state"]["lock"] = asyncio.Lock()
+        async def boot_ais() -> None:
+            # Let /healthz and the dashboard HTML bind before the AIS flood.
+            await asyncio.sleep(1.5)
+            if app["global_feed"] is not None:
+                app["tasks"]["global_feed"] = asyncio.create_task(
+                    app["global_feed"].run()
+                )
+
+        app["tasks"]["ais_boot"] = asyncio.create_task(boot_ais())
         if app.get("boot_pack_id"):
             app["tasks"]["precompute"] = asyncio.create_task(_warm_replay_cache(app))
 
@@ -539,7 +550,7 @@ def build_app(
         cached = app["snapshot_state"]["cache"]
         if cached and now - cached["at"] < 0.8 and cached["since"] == since:
             return web.json_response(cached["payload"])
-        lock = app.get("global_snapshot_lock")
+        lock = app["snapshot_state"]["lock"]
         if lock is None:
             return web.json_response(global_snapshot(app["global_feed"], since=since))
         async with lock:
@@ -1082,7 +1093,10 @@ def main() -> None:
         boot_pack_id=pack_id,
         boot_max_frames=max_frames,
     )
-    web.run_app(app, host="0.0.0.0", port=port)
+    host: str | list[str] = (
+        ["0.0.0.0", "::"] if os.environ.get("RAILWAY_ENVIRONMENT") else "0.0.0.0"
+    )
+    web.run_app(app, host=host, port=port)
 
 
 if __name__ == "__main__":
