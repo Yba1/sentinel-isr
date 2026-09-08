@@ -361,14 +361,18 @@ def build_app(
         app["snapshot_state"]["lock"] = asyncio.Lock()
         async def boot_ais() -> None:
             # Let /healthz and the dashboard HTML bind before the AIS flood.
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(3.0)
             if app["global_feed"] is not None:
                 app["tasks"]["global_feed"] = asyncio.create_task(
                     app["global_feed"].run()
                 )
 
         app["tasks"]["ais_boot"] = asyncio.create_task(boot_ais())
-        if app.get("boot_pack_id"):
+        skip_replay = (
+            bool(os.environ.get("RAILWAY_ENVIRONMENT"))
+            and os.environ.get("AEGIS_SLOW_BOOT") != "1"
+        )
+        if app.get("boot_pack_id") and not skip_replay:
             app["tasks"]["precompute"] = asyncio.create_task(_warm_replay_cache(app))
 
     async def stop_global_feed(app: web.Application) -> None:
@@ -1093,10 +1097,7 @@ def main() -> None:
         boot_pack_id=pack_id,
         boot_max_frames=max_frames,
     )
-    host: str | list[str] = (
-        ["0.0.0.0", "::"] if os.environ.get("RAILWAY_ENVIRONMENT") else "0.0.0.0"
-    )
-    web.run_app(app, host=host, port=port)
+    web.run_app(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":

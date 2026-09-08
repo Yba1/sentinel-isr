@@ -41,16 +41,16 @@ DIGITRAFFIC_DARK_AFTER_S = max(
 DIGITRAFFIC_METADATA_REFRESH_SECONDS = 5 * 60
 _ON_RAILWAY = bool(os.getenv("RAILWAY_ENVIRONMENT"))
 MAX_TRACKED = min(
-    int(os.getenv("AEGIS_MAX_ACTIVE_VESSELS", "2000" if _ON_RAILWAY else "8000")),
-    2500 if _ON_RAILWAY else 12000,
+    int(os.getenv("AEGIS_MAX_ACTIVE_VESSELS", "800" if _ON_RAILWAY else "8000")),
+    1200 if _ON_RAILWAY else 12000,
 )
 DARK_AFTER_S = 45.0  # no fresh position report: render as a coasting contact
-MAX_HISTORY = 20
+MAX_HISTORY = 8 if _ON_RAILWAY else 20
 MAX_TOMBSTONES = 50000
 STATE_RETENTION_S = 24 * 60 * 60
 STATE_RESTORE_MAX = 2500
 SNAPSHOT_LIMIT = min(
-    int(os.getenv("AEGIS_SNAPSHOT_LIMIT", "600" if _ON_RAILWAY else "1200")),
+    int(os.getenv("AEGIS_SNAPSHOT_LIMIT", "400" if _ON_RAILWAY else "1200")),
     2500,
 )
 SNAPSHOT_SKIP_FIELDS = frozenset({"history", "history_samples"})
@@ -71,11 +71,9 @@ ALL_REGIONAL_BOXES = [
     [[-10, 90], [20, 125]],      # Malacca / Indonesia
     [[-40, 10], [-20, 45]],      # Southern Africa
 ]
-# Ten world boxes can deliver thousands of messages per second and OOM a
-# single Railway process as soon as the dashboard opens. Keep global
-# coverage locally; subscribe to the busiest four regions in production.
+# Two busy boxes keep a Railway replica alive; local runs keep worldwide coverage.
 REGIONAL_BOXES = (
-    ALL_REGIONAL_BOXES[:4]
+    ALL_REGIONAL_BOXES[:2]
     if _ON_RAILWAY
     else ALL_REGIONAL_BOXES
 )
