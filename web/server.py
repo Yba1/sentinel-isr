@@ -17,6 +17,7 @@ import asyncio
 import json
 import math
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -1075,6 +1076,40 @@ async def _body(request: web.Request) -> dict:
     return {}
 
 
+def _listen(app: web.Application, port: int) -> None:
+    """Bind IPv4 and IPv6 independently so Railway healthchecks and the
+    public edge proxy can both reach the process."""
+    hosts = ["0.0.0.0", "::"] if os.environ.get("RAILWAY_ENVIRONMENT") else ["0.0.0.0"]
+
+    async def run() -> None:
+        runner = web.AppRunner(app)
+        await runner.setup()
+        bound: list[str] = []
+        for host in hosts:
+            site = web.TCPSite(runner, host, port)
+            try:
+                await site.start()
+            except OSError as exc:
+                print(f"[server] bind {host}:{port} failed: {exc}", flush=True)
+                continue
+            bound.append(f"{host}:{port}")
+            print(f"[server] listening on {host}:{port}", flush=True)
+        if not bound:
+            await runner.cleanup()
+            raise SystemExit(f"could not bind HTTP on port {port}")
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except NotImplementedError:
+                pass
+        await stop.wait()
+        await runner.cleanup()
+
+    asyncio.run(run())
+
+
 def main() -> None:
     # Synthetic pack is the default for a sub-second boot.
     # AEGIS_PACK=s01_dark_in_sanctuary exercises the acceptance criteria
@@ -1091,21 +1126,13 @@ def main() -> None:
         if max_frames < 0 or max_frames > 12:
             max_frames = 8
 
-    bind_host = "::" if os.environ.get("RAILWAY_ENVIRONMENT") else "0.0.0.0"
-    print(f"[server] binding HTTP on {bind_host}:{port} ...", flush=True)
+    print(f"[server] starting HTTP on PORT={port} ...", flush=True)
     app = build_app(
         placeholder_cache(pack_id),
         boot_pack_id=pack_id,
         boot_max_frames=max_frames,
     )
-    try:
-        web.run_app(app, host=bind_host, port=port)
-    except OSError as exc:
-        if bind_host == "::":
-            print(f"[server] IPv6 bind failed ({exc}); falling back to 0.0.0.0", flush=True)
-            web.run_app(app, host="0.0.0.0", port=port)
-        else:
-            raise
+    _listen(app, port)
 
 
 if __name__ == "__main__":
