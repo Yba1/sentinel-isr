@@ -245,28 +245,34 @@ const BoatCanvasRenderer = L.Canvas.extend({
 });
 
 function cartoBasemapUrl() {
-  const key = String(window.AEGIS_CARTO_KEY || "").trim();
-  const query = key ? `?key=${encodeURIComponent(key)}` : "";
   // CARTO retired the "dark_matter" path (404s now); "dark_all" is the
-  // live equivalent -- confirmed by curl against basemaps.cartocdn.com.
-  return `https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png${query}`;
+  // live equivalent. Leaflet substitutes {apikey} from layer options so
+  // retina @2x tiles keep the key query parameter.
+  return "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key={apikey}";
 }
 
-L.tileLayer(
-  cartoBasemapUrl(),
-  {
+function cartoBasemapOptions(extra = {}) {
+  return {
     subdomains: "abcd",
     minZoom: 2,
     maxZoom: 19,
     noWrap: true,
     bounds: [[-85, -180], [85, 180]],
+    apikey: String(window.AEGIS_CARTO_KEY || "").trim(),
+    ...extra,
+  };
+}
+
+L.tileLayer(
+  cartoBasemapUrl(),
+  cartoBasemapOptions({
     updateWhenZooming: true,
     updateWhenIdle: false,
     keepBuffer: 3,
     attribution:
       '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · ' +
       '&copy; <a href="https://carto.com/attributions">CARTO</a>',
-  }
+  })
 ).addTo(map);
 
 let cameraInFlight = false;
@@ -309,9 +315,44 @@ const bathymetryLayer = L.tileLayer.wms("https://wms.gebco.net/mapserv?", {
   layers: "GEBCO_LATEST",
   format: "image/png",
   transparent: true,
-  opacity: 0.3,
+  opacity: 0.28,
+  tileSize: 512,
+  updateWhenZooming: false,
+  updateWhenIdle: true,
+  keepBuffer: 4,
+  className: "bathymetry-tile",
   attribution: "GEBCO 2026",
 }).addTo(map);
+
+function syncBathymetryPresentation() {
+  if (!state.bathymetryOn) return;
+  const zoom = map.getZoom();
+  let opacity = 0.28;
+  let blur = 0;
+  if (zoom >= 15) {
+    blur = 24;
+  } else if (zoom >= 14) {
+    blur = 16;
+  } else if (zoom >= 13) {
+    blur = 9;
+  } else if (zoom >= 12) {
+    blur = 3;
+  } else if (zoom >= 11) {
+    opacity = 0.27;
+  }
+  bathymetryLayer.setOpacity(opacity);
+  const container = bathymetryLayer.getContainer?.();
+  if (container) {
+    container.style.filter = blur
+      ? `blur(${blur}px) saturate(0.88)`
+      : "saturate(0.94)";
+  }
+}
+
+map.on("zoom zoomend", syncBathymetryPresentation);
+bathymetryLayer.on("load", syncBathymetryPresentation);
+syncBathymetryPresentation();
+
 els.btnBathymetry.addEventListener("click", () => {
   state.bathymetryOn = !state.bathymetryOn;
   els.btnBathymetry.classList.toggle("active", state.bathymetryOn);
@@ -319,7 +360,10 @@ els.btnBathymetry.addEventListener("click", () => {
     "aria-pressed",
     String(state.bathymetryOn)
   );
-  if (state.bathymetryOn) bathymetryLayer.addTo(map);
+  if (state.bathymetryOn) {
+    bathymetryLayer.addTo(map);
+    syncBathymetryPresentation();
+  }
   else map.removeLayer(bathymetryLayer);
 });
 
@@ -1561,13 +1605,72 @@ function trajectoryBearing(from, to, fallback = 0) {
   return Math.atan2(east, north) * 180 / Math.PI;
 }
 
+function trajectorySegmentNm(from, to) {
+  const north = (Number(to[0]) - Number(from[0])) * 60;
+  const east =
+    (Number(to[1]) - Number(from[1])) *
+    60 *
+    Math.cos((Number(from[0]) * Math.PI) / 180);
+  return Math.hypot(east, north);
+}
+
+/** Build cumulative-distance samples so animation moves by NM, not point index. */
+function buildTrajectoryMotion(path) {
+  const points = (path || [])
+    .map((point) => [Number(point[0]), Number(point[1])])
+    .filter((point) => Number.isFinite(point[0]) && Number.isFinite(point[1]));
+  if (points.length === 0) {
+    return { points: [[0, 0]], cumulative: [0], totalNm: 0 };
+  }
+  if (points.length === 1) {
+    return { points, cumulative: [0], totalNm: 0 };
+  }
+  const cumulative = [0];
+  for (let i = 1; i < points.length; i += 1) {
+    cumulative.push(cumulative[i - 1] + trajectorySegmentNm(points[i - 1], points[i]));
+  }
+  return {
+    points,
+    cumulative,
+    totalNm: cumulative[cumulative.length - 1],
+  };
+}
+
+function sampleTrajectoryMotion(motion, progress, fallbackBearing = 0) {
+  const points = motion.points;
+  if (points.length === 1) {
+    return { position: points[0], bearing: fallbackBearing };
+  }
+  const totalNm = Math.max(motion.totalNm, 1e-9);
+  const target = Math.min(1, Math.max(0, progress)) * totalNm;
+  const cumulative = motion.cumulative;
+  let segment = cumulative.length - 2;
+  for (let i = 1; i < cumulative.length; i += 1) {
+    if (target <= cumulative[i]) {
+      segment = i - 1;
+      break;
+    }
+  }
+  const from = points[segment];
+  const to = points[segment + 1];
+  const span = Math.max(1e-9, cumulative[segment + 1] - cumulative[segment]);
+  const fraction = (target - cumulative[segment]) / span;
+  return {
+    position: [
+      from[0] + (to[0] - from[0]) * fraction,
+      from[1] + (to[1] - from[1]) * fraction,
+    ],
+    bearing: trajectoryBearing(from, to, fallbackBearing),
+  };
+}
+
 function startTrajectoryAnimation(runners, { preservePhase = false } = {}) {
   stopTrajectoryAnimation({ resetClock: !preservePhase });
   let readinessFrames = 0;
   const begin = () => {
     if (
       runners.some((runner) => runner.marker.getElement() === null)
-      && readinessFrames < 4
+      && readinessFrames < 8
     ) {
       readinessFrames += 1;
       state.trajectoryAnimationFrame = requestAnimationFrame(begin);
@@ -1577,9 +1680,20 @@ function startTrajectoryAnimation(runners, { preservePhase = false } = {}) {
       ? state.trajectoryAnimationStartedAt
       : performance.now();
     state.trajectoryAnimationStartedAt = startedAt;
-    const durationMs = 4800;
-    const travelEnd = 0.88;
-    const fadeStart = 0.8;
+    for (const runner of runners) {
+      if (!runner.motion) runner.motion = buildTrajectoryMotion(runner.path);
+    }
+    // Pace by geographic length so dense early samples do not freeze the boats.
+    const longestNm = runners.reduce(
+      (max, runner) => Math.max(max, runner.motion?.totalNm || 0),
+      0
+    );
+    const durationMs = Math.min(
+      18000,
+      Math.max(7000, 5500 + longestNm * 1800)
+    );
+    const travelEnd = 0.92;
+    const fadeStart = 0.86;
     const animate = (now) => {
       const phase = ((now - startedAt) % durationMs) / durationMs;
       for (const runner of runners) {
@@ -1591,25 +1705,22 @@ function startTrajectoryAnimation(runners, { preservePhase = false } = {}) {
             0,
             (travelEnd - runnerPhase) / (travelEnd - fadeStart)
           );
-        const scaled = progress * (runner.path.length - 1);
-        const segment = Math.min(runner.path.length - 2, Math.floor(scaled));
-        const fraction = scaled - segment;
-        const from = runner.path[segment];
-        const to = runner.path[segment + 1];
+        const sample = sampleTrajectoryMotion(
+          runner.motion,
+          progress,
+          runner.stableBearing
+        );
         const rawBearing = runner.shortRoute
           ? runner.stableBearing
-          : trajectoryBearing(from, to, runner.stableBearing);
+          : sample.bearing;
         if (runner.displayBearing === undefined) {
           runner.displayBearing = rawBearing;
         } else {
           const bearingDelta =
             (rawBearing - runner.displayBearing + 540) % 360 - 180;
-          runner.displayBearing += bearingDelta * 0.16;
+          runner.displayBearing += bearingDelta * 0.22;
         }
-        runner.marker.setLatLng([
-          from[0] + (to[0] - from[0]) * fraction,
-          from[1] + (to[1] - from[1]) * fraction,
-        ]);
+        runner.marker.setLatLng(sample.position);
         const element = runner.marker.getElement();
         if (element) {
           element.style.opacity = String(
@@ -1773,13 +1884,7 @@ function prepareSimulationMap(bounds) {
     });
     L.tileLayer(
       cartoBasemapUrl(),
-      {
-        subdomains: "abcd",
-        minZoom: 2,
-        maxZoom: 19,
-        noWrap: true,
-        bounds: [[-85, -180], [85, 180]],
-      }
+      cartoBasemapOptions()
     ).addTo(state.simulationMap);
     state.simulationMap.on("zoomend", refreshSimulationMapProjection);
   }
@@ -3010,23 +3115,21 @@ async function showTrajectory(
     );
     const elapsedPath = path.slice(0, currentIndex + 1);
     const forecastPath = path.slice(currentIndex);
-    const animationPath = forecastPath.length > 1
-      ? forecastPath
-      : path.slice(Math.max(0, path.length - 2));
+    // Animate along the full modeled route (elapsed orange path + forward
+    // outlook). Forecasting-only stubs are often <0.3 NM and look static.
+    const animationPath = path.length > 1
+      ? path
+      : forecastPath.length > 1
+        ? forecastPath
+        : path.slice(Math.max(0, path.length - 2));
+    const motion = buildTrajectoryMotion(animationPath);
     const phaseOffset = index / Math.max(1, scenarios.length);
-    const initialProgress = Math.min(1, phaseOffset / 0.88);
-    const initialScaled = initialProgress * (animationPath.length - 1);
-    const initialSegment = Math.min(
-      animationPath.length - 2,
-      Math.floor(initialScaled)
+    const initialSample = sampleTrajectoryMotion(
+      motion,
+      Math.min(0.08, phaseOffset * 0.12),
+      Number(v.course) || Number(v.heading) || 0
     );
-    const initialFraction = initialScaled - initialSegment;
-    const initialFrom = animationPath[initialSegment];
-    const initialTo = animationPath[initialSegment + 1];
-    const initialPosition = [
-      initialFrom[0] + (initialTo[0] - initialFrom[0]) * initialFraction,
-      initialFrom[1] + (initialTo[1] - initialFrom[1]) * initialFraction,
-    ];
+    const initialPosition = initialSample.position;
     if (elapsedPath.length > 1) {
       const elapsedLine = L.polyline(elapsedPath, {
         color: "#ffb020",
@@ -3079,29 +3182,30 @@ async function showTrajectory(
       ),
       0
     );
-    const shortRoute =
-      Number(scenario.distance_nm || 0) < 0.4 ||
-      routeSpanPx < 10;
+    // Only treat as "short" when the on-map track is truly tiny.
+    const shortRoute = routeSpanPx < 28 && motion.totalNm < 0.35;
     const stableBearing = trajectoryBearing(
       animationPath[0],
       animationPath[animationPath.length - 1],
       Number(v.course) || Number(v.heading) || 0
     );
     const runner = L.marker(initialPosition, {
-      icon: trajectoryRunnerIcon(color, shortRoute || !prominent),
+      icon: trajectoryRunnerIcon(color, shortRoute),
       interactive: false,
       keyboard: false,
-      zIndexOffset: 1000,
+      zIndexOffset: 1200 - index,
     }).addTo(globalProjectionLayer);
     runner._trajectoryRunner = true;
     runners.push({
       marker: runner,
       path: animationPath,
+      motion,
       phaseOffset,
       shortRoute,
-      opacityScale: prominent ? 1 : 0.35,
+      // Keep secondary routes readable so long dashed tracks still show boats.
+      opacityScale: prominent ? 1 : 0.72,
       stableBearing,
-      displayBearing: stableBearing,
+      displayBearing: initialSample.bearing || stableBearing,
     });
   });
   const drivers = prediction.uncertainty_drivers || [];
@@ -3657,6 +3761,47 @@ function setGlobalLayer() {
 }
 
 let globalPollTimer = null;
+const GLOBAL_POLL_MS = 2500;
+const GLOBAL_POLL_LOADING_MS = 400;
+
+function syncAisLoading() {
+  const root = document.getElementById("ais-loading");
+  const detail = document.getElementById("ais-loading-detail");
+  const counts = document.getElementById("ais-loading-counts");
+  if (!root || !detail || !counts) return;
+  const introOpen = Boolean(document.getElementById("aegis-intro"));
+  const status = state.globalStatus || {};
+  const ready = Boolean(state.globalLive && state.globalVessels.size);
+  const hide = ready || introOpen;
+  root.hidden = hide;
+  root.setAttribute("aria-hidden", String(hide));
+  if (hide) return;
+  if (status.configured === false) {
+    detail.textContent = "AISStream is not configured on this server.";
+    counts.textContent = "";
+    return;
+  }
+  if (!status.connected) {
+    detail.textContent = "Connecting to the global AIS feed…";
+  } else if (!state.globalLive) {
+    detail.textContent = "Connected. Waiting for the first position reports…";
+  } else {
+    detail.textContent = "Receiving live positions…";
+  }
+  const reports = Number(status.position_reports || 0);
+  const contacts = state.globalVessels.size || Number(status.total_contacts || 0);
+  counts.textContent = reports || contacts
+    ? `${reports.toLocaleString()} reports · ${contacts.toLocaleString()} contacts`
+    : "";
+}
+
+function setGlobalPollInterval(ms) {
+  if (state._globalPollMs === ms && globalPollTimer) return;
+  state._globalPollMs = ms;
+  if (globalPollTimer) clearInterval(globalPollTimer);
+  globalPollTimer = setInterval(pollGlobal, ms);
+}
+
 async function pollGlobal() {
   try {
     const data = await getJson(`/api/global?since=${state.globalRevision}`);
@@ -3721,12 +3866,19 @@ async function pollGlobal() {
         renderLiveChecks();
       }
     }
-  } catch (err) {
-    // Global layer is best-effort; local pack streaming must never depend on it.
+    setGlobalPollInterval(
+      state.globalLive && state.globalVessels.size
+        ? GLOBAL_POLL_MS
+        : GLOBAL_POLL_LOADING_MS
+    );
+  } catch (_err) {
+    state.globalStatus = { ...state.globalStatus, connected: false };
   }
+  syncAisLoading();
 }
-globalPollTimer = setInterval(pollGlobal, 4000);
+setGlobalPollInterval(GLOBAL_POLL_LOADING_MS);
 pollGlobal();
+window.addEventListener("aegis:intro-complete", syncAisLoading);
 
 // ---------------------------------------------------------------- websocket
 

@@ -135,6 +135,72 @@ textarea {
 #map-wrap { flex: 1 1 auto; min-width: 0; position: relative; }
 #map { position: absolute; inset: 0; background: #060a0e; }
 
+.ais-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 2400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 10, 14, 0.78);
+  backdrop-filter: blur(10px);
+  pointer-events: none;
+}
+.ais-loading[hidden] {
+  display: none;
+}
+.ais-loading-card {
+  width: min(420px, calc(100% - 48px));
+  padding: 28px 28px 24px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(18, 21, 24, 0.94);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  text-align: center;
+}
+.ais-loading-spinner {
+  width: 36px;
+  height: 36px;
+  margin: 0 auto 16px;
+  border: 2px solid rgba(79, 134, 255, 0.18);
+  border-top-color: var(--cyan);
+  border-radius: 50%;
+  animation: ais-spin 0.8s linear infinite;
+}
+.ais-loading-kicker {
+  margin: 0 0 6px;
+  color: var(--cyan);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.ais-loading-card h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  font-weight: 600;
+}
+.ais-loading-card p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1.45;
+}
+#ais-loading-counts {
+  margin-top: 10px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+@keyframes ais-spin {
+  to { transform: rotate(360deg); }
+}
+
+.bathymetry-tile {
+  image-rendering: auto;
+  transition: opacity 220ms ease;
+  backface-visibility: hidden;
+}
+
 .trajectory-loading {
   position: absolute;
   inset: 0;

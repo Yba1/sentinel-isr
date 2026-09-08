@@ -5,6 +5,27 @@ from __future__ import annotations
 import json
 import os
 
+_CARTO_ENV_KEYS = ("CARTOAPIKEY", "CARTO_API_KEY", "CARTO_KEY")
+
+
+def carto_api_key(explicit: str | None = None) -> str:
+    """Read the CARTO raster basemap key from common env names.
+
+    Railway and local .env files have used both CARTOAPIKEY and
+    CARTO_API_KEY. Surrounding quotes copied from a dashboard paste are
+    stripped so the tile URL stays valid.
+    """
+    if explicit is not None:
+        raw = explicit
+    else:
+        raw = ""
+        for name in _CARTO_ENV_KEYS:
+            value = os.environ.get(name, "")
+            if str(value).strip():
+                raw = value
+                break
+    return str(raw).strip().strip('"').strip("'")
+
 
 def runtime_carto_config_js(api_key: str | None = None) -> str:
     """Publish the CARTO basemap key to the browser as a JS assignment.
@@ -13,7 +34,5 @@ def runtime_carto_config_js(api_key: str | None = None) -> str:
     watermarked. The key is domain-restricted by CARTO, so it is meant to
     appear on the tile URL rather than stay server-only.
     """
-    key = (
-        api_key if api_key is not None else os.environ.get("CARTOAPIKEY", "")
-    ).strip()
+    key = carto_api_key(api_key)
     return f"window.AEGIS_CARTO_KEY={json.dumps(key)};\n"

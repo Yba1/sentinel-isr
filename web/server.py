@@ -852,6 +852,9 @@ def build_app(cache: dict) -> web.Application:
     app.router.add_get("/api/brief", api_brief)
     app.router.add_get("/api/eval", api_eval)
 
+    async def api_health(_request: web.Request) -> web.Response:
+        return web.Response(text="ok", headers={"Cache-Control": "no-store"})
+
     async def api_runtime_config(_request: web.Request) -> web.Response:
         return web.Response(
             text=runtime_carto_config_js(),
@@ -859,7 +862,24 @@ def build_app(cache: dict) -> web.Application:
             headers={"Cache-Control": "no-store"},
         )
 
+    async def api_dashboard(_request: web.Request) -> web.Response:
+        html = (web_dir / "dashboard.html").read_text(encoding="utf-8")
+        html = html.replace(
+            '<script src="/api/runtime-config.js"></script>',
+            f"<script>{runtime_carto_config_js()}</script>",
+            1,
+        )
+        return web.Response(
+            text=html,
+            content_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    web_dir = Path(__file__).resolve().parent
+    app.router.add_get("/healthz", api_health)
     app.router.add_get("/api/runtime-config.js", api_runtime_config)
+    app.router.add_get("/", api_dashboard)
+    app.router.add_get("/dashboard", api_dashboard)
 
     # -------------------------------------------------------------------- WS
 
@@ -903,9 +923,6 @@ def build_app(cache: dict) -> web.Application:
 
     # ---------------------------------------------------------------- static
 
-    web_dir = Path(__file__).resolve().parent
-    app.router.add_get("/", lambda r: web.FileResponse(web_dir / "dashboard.html"))
-    app.router.add_get("/dashboard", lambda r: web.FileResponse(web_dir / "dashboard.html"))
     app.router.add_static("/", web_dir, show_index=False)
 
     return app
@@ -928,6 +945,13 @@ def main() -> None:
     pack_id = os.environ.get("AEGIS_PACK", "s02_synthetic_demo")
     max_frames = int(os.environ.get("AEGIS_FRAMES", "-1"))
     port = int(os.environ.get("PORT", "8765"))
+    # The public Railway demo is the live AIS picture. Do not keep the
+    # HTTP port closed for the multi-minute s01 tracker precompute.
+    if os.environ.get("RAILWAY_ENVIRONMENT") and os.environ.get("AEGIS_SLOW_BOOT") != "1":
+        if pack_id.startswith("s01"):
+            pack_id = "s02_synthetic_demo"
+        if max_frames < 0 or max_frames > 12:
+            max_frames = 8
 
     print(f"[server] precomputing {pack_id} ...", flush=True)
     t0 = time.perf_counter()

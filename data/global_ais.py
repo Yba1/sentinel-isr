@@ -39,11 +39,15 @@ DIGITRAFFIC_DARK_AFTER_S = max(
     float(os.getenv("AEGIS_DIGITRAFFIC_DARK_AFTER_SECONDS", "180")),
 )
 DIGITRAFFIC_METADATA_REFRESH_SECONDS = 5 * 60
-MAX_TRACKED = int(os.getenv("AEGIS_MAX_ACTIVE_VESSELS", "100000"))
+MAX_TRACKED = min(int(os.getenv("AEGIS_MAX_ACTIVE_VESSELS", "8000")), 12000)
 DARK_AFTER_S = 45.0  # no fresh position report: render as a coasting contact
 MAX_HISTORY = 20
 MAX_TOMBSTONES = 50000
 STATE_RETENTION_S = 24 * 60 * 60
+STATE_RESTORE_MAX = 2500
+SNAPSHOT_LIMIT = min(int(os.getenv("AEGIS_SNAPSHOT_LIMIT", "2500")), 4000)
+SNAPSHOT_SKIP_FIELDS = frozenset({"history", "history_samples"})
+INGEST_YIELD_EVERY = 15
 
 # Busy maritime regions across every inhabited continent. A single world box
 # can deliver thousands of messages per second and starve the API server; these
@@ -102,12 +106,21 @@ class GlobalAisFeed:
         try:
             with gzip.open(self.state_path, "rt", encoding="utf-8") as stream:
                 payload = json.load(stream)
-            for saved in payload.get("vessels", ()):
+            saved_rows = sorted(
+                payload.get("vessels", ()),
+                key=lambda saved: float(saved.get("last_seen", 0.0)),
+                reverse=True,
+            )
+            restored = 0
+            for saved in saved_rows:
+                if restored >= STATE_RESTORE_MAX:
+                    break
                 mmsi = int(saved["mmsi"])
                 last_seen = float(saved["last_seen"])
                 age_s = max(0.0, now - last_seen)
                 if age_s > STATE_RETENTION_S:
                     continue
+                restored += 1
                 row = {
                     key: value
                     for key, value in saved.items()
@@ -360,7 +373,7 @@ class GlobalAisFeed:
                                 except (ValueError, TypeError, KeyError, UnicodeDecodeError):
                                     continue
                                 since_yield += 1
-                                if since_yield >= 100:
+                                if since_yield >= INGEST_YIELD_EVERY:
                                     since_yield = 0
                                     await asyncio.sleep(0)
                             elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED):
@@ -396,7 +409,7 @@ class GlobalAisFeed:
             row = {
                 key: value
                 for key, value in fix.items()
-                if not key.startswith("_")
+                if not key.startswith("_") and key not in SNAPSHOT_SKIP_FIELDS
             }
             row["age_s"] = round(age_s, 1)
             row["dark"] = dark
@@ -421,6 +434,24 @@ class GlobalAisFeed:
         full = since <= 0 or since < self._delta_floor or since > self.revision
         effective_since = 0 if full else since
         vessels = self._snapshot_rows(effective_since)
+        if full and SNAPSHOT_LIMIT and len(vessels) > SNAPSHOT_LIMIT:
+            vessels.sort(
+                key=lambda row: (
+                    not row.get("dark"),
+                    float(row.get("last_seen") or 0.0),
+                ),
+                reverse=True,
+            )
+            pinned = self.pinned_mmsi
+            kept = vessels[:SNAPSHOT_LIMIT]
+            if pinned is not None and not any(row.get("mmsi") == pinned for row in kept):
+                extra = next(
+                    (row for row in vessels if row.get("mmsi") == pinned),
+                    None,
+                )
+                if extra is not None:
+                    kept[-1] = extra
+            vessels = kept
         removed = [] if full else [
             mmsi for revision, mmsi in self._removed if revision > since
         ]

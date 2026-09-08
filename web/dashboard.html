@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<link rel="stylesheet" href="dashboard.css?v=20260811-forward-runners" />
+<link rel="stylesheet" href="dashboard.css?v=20260908-ais-loading" />
 <link rel="stylesheet" href="onboarding.css?v=20260802-intro8" />
 </head>
 <body class="intro-active">
@@ -80,6 +80,15 @@
 
     <div id="map-wrap">
       <div id="map"></div>
+      <section id="ais-loading" class="ais-loading" hidden aria-hidden="true">
+        <div class="ais-loading-card">
+          <div class="ais-loading-spinner" aria-hidden="true"></div>
+          <p class="ais-loading-kicker">AISStream</p>
+          <h2>Building the live picture</h2>
+          <p id="ais-loading-detail">Connecting to the global AIS feed…</p>
+          <p id="ais-loading-counts"></p>
+        </div>
+      </section>
       <section id="trajectory-loading" class="trajectory-loading" aria-hidden="true" aria-live="polite">
         <div class="trajectory-loading-field" aria-hidden="true"></div>
         <div class="trajectory-loading-content">
@@ -307,7 +316,7 @@
       <button class="vessel-visibility-option" type="button" data-vessel-visibility="live" aria-pressed="false">Live AIS</button>
       <button class="vessel-visibility-option active" type="button" data-vessel-visibility="both" aria-pressed="true">Both</button>
     </div>
-    <button id="btn-bathymetry" class="tbtn control-with-glyph active" title="Toggle colored GEBCO ocean map" aria-pressed="true">
+    <button id="btn-bathymetry" class="tbtn control-with-glyph active" title="Toggle colored GEBCO ocean map · automatically smooths at close zoom" aria-pressed="true">
       <span class="control-glyph control-glyph-depth" aria-hidden="true"></span>
       <span>Colored Map</span>
     </button>
@@ -320,6 +329,6 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="/api/runtime-config.js"></script>
 <script src="onboarding.js?v=20260802-intro7"></script>
-<script src="dashboard.js?v=20260907-carto-key"></script>
+<script src="dashboard.js?v=20260908-ais-loading"></script>
 </body>
 </html>

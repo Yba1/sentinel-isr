@@ -204,6 +204,32 @@ def test_position_reports_build_bounded_history():
     assert len(feed.vessels[123456789]["history"]) == global_ais.MAX_HISTORY
 
 
+def test_list_snapshot_omits_track_history():
+    feed = global_ais.GlobalAisFeed("not-a-real-key")
+    feed._record(123456789, {"lat": 1.0, "lon": 2.0, "name": "Slim"})
+
+    row = feed.snapshot()[0]
+
+    assert row["mmsi"] == 123456789
+    assert "history" not in row
+    assert "history_samples" not in row
+
+
+def test_full_snapshot_caps_contacts(monkeypatch):
+    monkeypatch.setattr(global_ais, "SNAPSHOT_LIMIT", 3)
+    feed = global_ais.GlobalAisFeed("not-a-real-key")
+    for index in range(6):
+        feed._record(
+            100000000 + index,
+            {"lat": 1.0, "lon": 2.0, "name": f"Ship {index}"},
+        )
+
+    payload = feed.snapshot_since(0)
+
+    assert payload["full"] is True
+    assert len(payload["vessels"]) == 3
+
+
 def test_runtime_provider_uses_aisstream_when_api_key_is_configured():
     assert global_ais.resolve_runtime_provider(
         "digitraffic", aisstream_api_key="test-key"
