@@ -1091,13 +1091,21 @@ def main() -> None:
         if max_frames < 0 or max_frames > 12:
             max_frames = 8
 
-    print(f"[server] binding HTTP on port {port} ...", flush=True)
+    bind_host = "::" if os.environ.get("RAILWAY_ENVIRONMENT") else "0.0.0.0"
+    print(f"[server] binding HTTP on {bind_host}:{port} ...", flush=True)
     app = build_app(
         placeholder_cache(pack_id),
         boot_pack_id=pack_id,
         boot_max_frames=max_frames,
     )
-    web.run_app(app, host="0.0.0.0", port=port)
+    try:
+        web.run_app(app, host=bind_host, port=port)
+    except OSError as exc:
+        if bind_host == "::":
+            print(f"[server] IPv6 bind failed ({exc}); falling back to 0.0.0.0", flush=True)
+            web.run_app(app, host="0.0.0.0", port=port)
+        else:
+            raise
 
 
 if __name__ == "__main__":
