@@ -18,6 +18,7 @@ import json
 import math
 import os
 import signal
+import socket
 import sys
 import time
 from pathlib import Path
@@ -360,15 +361,16 @@ def build_app(
 
     async def start_global_feed(app: web.Application) -> None:
         app["snapshot_state"]["lock"] = asyncio.Lock()
-        async def boot_ais() -> None:
-            # Let /healthz and the dashboard HTML bind before the AIS flood.
-            await asyncio.sleep(3.0)
-            if app["global_feed"] is not None:
-                app["tasks"]["global_feed"] = asyncio.create_task(
-                    app["global_feed"].run()
-                )
 
-        app["tasks"]["ais_boot"] = asyncio.create_task(boot_ais())
+        async def ensure_ais() -> None:
+            if app["global_feed"] is None or app["tasks"]["global_feed"] is not None:
+                return
+            print("[server] starting AIS ingest", flush=True)
+            app["tasks"]["global_feed"] = asyncio.create_task(
+                app["global_feed"].run()
+            )
+
+        app["ensure_ais"] = ensure_ais
         skip_replay = (
             bool(os.environ.get("RAILWAY_ENVIRONMENT"))
             and os.environ.get("AEGIS_SLOW_BOOT") != "1"
@@ -556,6 +558,9 @@ def build_app(
         if cached and now - cached["at"] < 0.8 and cached["since"] == since:
             return web.json_response(cached["payload"])
         lock = app["snapshot_state"]["lock"]
+        ensure = app.get("ensure_ais")
+        if ensure is not None:
+            await ensure()
         if lock is None:
             return web.json_response(global_snapshot(app["global_feed"], since=since))
         async with lock:
@@ -1076,27 +1081,61 @@ async def _body(request: web.Request) -> dict:
     return {}
 
 
-def _listen(app: web.Application, port: int) -> None:
-    """Bind IPv4 and IPv6 independently so Railway healthchecks and the
-    public edge proxy can both reach the process."""
-    hosts = ["0.0.0.0", "::"] if os.environ.get("RAILWAY_ENVIRONMENT") else ["0.0.0.0"]
+def _bind_http_sockets(port: int) -> list[socket.socket]:
+    """Prefer one dual-stack IPv6 socket so Railway's edge (IPv6) and
+    localhost healthchecks (IPv4) both reach the process."""
+    sockets: list[socket.socket] = []
+    sock: socket.socket | None = None
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except OSError:
+            pass
+        sock.bind(("::", port))
+        sock.setblocking(False)
+        print(f"[server] listening on [::]:{port} (dual-stack)", flush=True)
+        return [sock]
+    except OSError as exc:
+        print(f"[server] dual-stack bind failed: {exc}", flush=True)
+        if sock is not None:
+            sock.close()
 
+    for family, address, label in (
+        (socket.AF_INET, "0.0.0.0", "0.0.0.0"),
+        (socket.AF_INET6, "::", "[::]"),
+    ):
+        sock = None
+        try:
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6:
+                try:
+                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                except OSError:
+                    pass
+            sock.bind((address, port))
+            sock.setblocking(False)
+            sockets.append(sock)
+            print(f"[server] listening on {label}:{port}", flush=True)
+        except OSError as exc:
+            print(f"[server] bind {label}:{port} failed: {exc}", flush=True)
+            if sock is not None:
+                sock.close()
+    return sockets
+
+
+def _listen(app: web.Application, port: int) -> None:
     async def run() -> None:
+        sockets = _bind_http_sockets(port)
+        if not sockets:
+            raise SystemExit(f"could not bind HTTP on port {port}")
         runner = web.AppRunner(app)
         await runner.setup()
-        bound: list[str] = []
-        for host in hosts:
-            site = web.TCPSite(runner, host, port)
-            try:
-                await site.start()
-            except OSError as exc:
-                print(f"[server] bind {host}:{port} failed: {exc}", flush=True)
-                continue
-            bound.append(f"{host}:{port}")
-            print(f"[server] listening on {host}:{port}", flush=True)
-        if not bound:
-            await runner.cleanup()
-            raise SystemExit(f"could not bind HTTP on port {port}")
+        sites = [web.SockSite(runner, sock) for sock in sockets]
+        for site in sites:
+            await site.start()
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -1106,6 +1145,8 @@ def _listen(app: web.Application, port: int) -> None:
                 pass
         await stop.wait()
         await runner.cleanup()
+        for sock in sockets:
+            sock.close()
 
     asyncio.run(run())
 

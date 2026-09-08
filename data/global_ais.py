@@ -41,8 +41,8 @@ DIGITRAFFIC_DARK_AFTER_S = max(
 DIGITRAFFIC_METADATA_REFRESH_SECONDS = 5 * 60
 _ON_RAILWAY = bool(os.getenv("RAILWAY_ENVIRONMENT"))
 MAX_TRACKED = min(
-    int(os.getenv("AEGIS_MAX_ACTIVE_VESSELS", "800" if _ON_RAILWAY else "8000")),
-    1200 if _ON_RAILWAY else 12000,
+    int(os.getenv("AEGIS_MAX_ACTIVE_VESSELS", "400" if _ON_RAILWAY else "8000")),
+    800 if _ON_RAILWAY else 12000,
 )
 DARK_AFTER_S = 45.0  # no fresh position report: render as a coasting contact
 MAX_HISTORY = 8 if _ON_RAILWAY else 20
@@ -50,11 +50,12 @@ MAX_TOMBSTONES = 50000
 STATE_RETENTION_S = 24 * 60 * 60
 STATE_RESTORE_MAX = 2500
 SNAPSHOT_LIMIT = min(
-    int(os.getenv("AEGIS_SNAPSHOT_LIMIT", "400" if _ON_RAILWAY else "1200")),
+    int(os.getenv("AEGIS_SNAPSHOT_LIMIT", "200" if _ON_RAILWAY else "1200")),
     2500,
 )
 SNAPSHOT_SKIP_FIELDS = frozenset({"history", "history_samples"})
 INGEST_YIELD_EVERY = 5 if _ON_RAILWAY else 15
+INGEST_KEEP_EVERY = 8 if _ON_RAILWAY else 1
 
 # Busy maritime regions across every inhabited continent. A single world box
 # can deliver thousands of messages per second and starve the API server; these
@@ -71,9 +72,9 @@ ALL_REGIONAL_BOXES = [
     [[-10, 90], [20, 125]],      # Malacca / Indonesia
     [[-40, 10], [-20, 45]],      # Southern Africa
 ]
-# Two busy boxes keep a Railway replica alive; local runs keep worldwide coverage.
+# One busy box keeps a Railway replica alive; local runs keep worldwide coverage.
 REGIONAL_BOXES = (
-    ALL_REGIONAL_BOXES[:2]
+    ALL_REGIONAL_BOXES[:1]
     if _ON_RAILWAY
     else ALL_REGIONAL_BOXES
 )
@@ -390,7 +391,11 @@ class GlobalAisFeed:
                         async for msg in ws:
                             if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
                                 at_cap = len(self._active_order) >= MAX_TRACKED
-                                if at_cap and (since_yield % 4):
+                                skip = (
+                                    (INGEST_KEEP_EVERY > 1 and since_yield % INGEST_KEEP_EVERY)
+                                    or (at_cap and (since_yield % 4))
+                                )
+                                if skip:
                                     since_yield += 1
                                     if since_yield >= INGEST_YIELD_EVERY:
                                         since_yield = 0

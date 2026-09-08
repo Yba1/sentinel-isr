@@ -193,11 +193,18 @@ class GlobalFishingWatchClient:
         self._cache: dict[int, tuple[float, dict[str, Any]]] = {}
         self._event_cache: dict[int, tuple[float, dict[str, Any]]] = {}
         self._style_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-        self._style_locks = {kind: asyncio.Lock() for kind in MAP_LAYERS}
+        self._style_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
+
+    def _style_lock(self, kind: str) -> asyncio.Lock:
+        lock = self._style_locks.get(kind)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._style_locks[kind] = lock
+        return lock
 
     async def vessel_identity(self, mmsi: int) -> dict[str, Any]:
         cached = self._cache.get(mmsi)
@@ -362,7 +369,7 @@ class GlobalFishingWatchClient:
         if cached and now - cached[0] < STYLE_CACHE_TTL_S:
             return cached[1]
 
-        async with self._style_locks[kind]:
+        async with self._style_lock(kind):
             cached = self._style_cache.get(kind)
             now = time.time()
             if cached and now - cached[0] < STYLE_CACHE_TTL_S:
